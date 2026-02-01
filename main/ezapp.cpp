@@ -30,12 +30,12 @@ bool EzApp::init()
     if (initialized_) return true;
 
     for (int i = 0; i < COUNT; ++i) {
-        groups_[i] = static_cast<uint8_t *>(std::malloc(GROUP_SIZE));
+        groups_[i] = static_cast<int16_t *>(std::malloc(GROUP_SIZE));
         if (!groups_[i]) {
             for (int j = 0; j < i; ++j) std::free(groups_[j]);
             return false;
         }
-        std::memset(groups_[i], 0, GROUP_SIZE);
+        std::memset(reinterpret_cast<void *>(groups_[i]), 0, GROUP_SIZE);
     }
     initialized_ = true;
 
@@ -61,7 +61,7 @@ void EzApp::deinit()
 {
     if (!initialized_) return;
     for (int i = 0; i < COUNT; ++i) {
-        std::free(groups_[i]);
+        std::free(reinterpret_cast<void *>(groups_[i]));
         groups_[i] = nullptr;
     }
     initialized_ = false;
@@ -152,7 +152,7 @@ bool EzApp::init_rtc()
     return true;
 }
 
-bool EzApp::set_rtc_time(uint8_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second, uint8_t weekday)
+bool EzApp::set_rtc_time(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second, uint8_t weekday)
 {
     // DS1307 I2C address
     const uint8_t DS1307_ADDR = 0x68;
@@ -184,161 +184,128 @@ bool EzApp::set_rtc_time(uint8_t year, uint8_t month, uint8_t day, uint8_t hour,
     return true;
 }
 
-int EzApp::writeShort(Group g, uint32_t offset, short value)
+// Internal helpers: read/write raw bytes from group storage
+bool EzApp::read_group_bytes(EzApp::Group g, uint32_t offset, void *dest, std::size_t bytes)
 {
-    if (check_bounds_cpp(g, offset, sizeof(short)) != 0) return -1;
-    if (mutex_) xSemaphoreTake(mutex_, pdMS_TO_TICKS(200));
-    std::memcpy(&groups_[g][offset], &value, sizeof(short));
-    if (mutex_) xSemaphoreGive(mutex_);
-    return 0;
+    if (check_bounds_cpp(g, offset, static_cast<uint32_t>(bytes)) != 0) return false;
+    if (!this->mutex_) return false;
+    if (xSemaphoreTake(this->mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    std::memcpy(dest, reinterpret_cast<uint8_t *>(this->groups_[g]) + offset, bytes);
+    xSemaphoreGive(this->mutex_);
+    return true;
 }
 
-int EzApp::readShort(Group g, uint32_t offset, short &out)
+bool EzApp::write_group_bytes(EzApp::Group g, uint32_t offset, const void *src, std::size_t bytes)
 {
-    if (check_bounds_cpp(g, offset, sizeof(short)) != 0) return -1;
-    if (mutex_) xSemaphoreTake(mutex_, pdMS_TO_TICKS(200));
-    std::memcpy(&out, &groups_[g][offset], sizeof(short));
-    if (mutex_) xSemaphoreGive(mutex_);
-    return 0;
+    if (check_bounds_cpp(g, offset, static_cast<uint32_t>(bytes)) != 0) return false;
+    if (!this->mutex_) return false;
+    if (xSemaphoreTake(this->mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    std::memcpy(reinterpret_cast<uint8_t *>(this->groups_[g]) + offset, src, bytes);
+    xSemaphoreGive(this->mutex_);
+    return true;
 }
 
-int EzApp::writeInt16(Group g, uint32_t offset, int16_t value)
+bool EzApp::read_group_int8(Group g, int8_t *dest, std::size_t count)
 {
-    if (check_bounds_cpp(g, offset, sizeof(int16_t)) != 0) return -1;
-    if (mutex_) xSemaphoreTake(mutex_, pdMS_TO_TICKS(200));
-    std::memcpy(&groups_[g][offset], &value, sizeof(int16_t));
-    if (mutex_) xSemaphoreGive(mutex_);
-    return 0;
+    return read_group_bytes(g, 0, dest, count * sizeof(int8_t));
 }
 
-int EzApp::readInt16(Group g, uint32_t offset, int16_t &out)
+bool EzApp::write_group_int8(Group g, const int8_t *src, std::size_t count)
 {
-    if (check_bounds_cpp(g, offset, sizeof(int16_t)) != 0) return -1;
-    if (mutex_) xSemaphoreTake(mutex_, pdMS_TO_TICKS(200));
-    std::memcpy(&out, &groups_[g][offset], sizeof(int16_t));
-    if (mutex_) xSemaphoreGive(mutex_);
-    return 0;
+    return write_group_bytes(g, 0, src, count * sizeof(int8_t));
 }
 
-int EzApp::writeInt32(Group g, uint32_t offset, int32_t value)
+bool EzApp::read_group_int16(Group g, int16_t *dest, std::size_t count)
 {
-    if (check_bounds_cpp(g, offset, sizeof(int32_t)) != 0) return -1;
-    if (mutex_) xSemaphoreTake(mutex_, pdMS_TO_TICKS(200));
-    std::memcpy(&groups_[g][offset], &value, sizeof(int32_t));
-    if (mutex_) xSemaphoreGive(mutex_);
-    return 0;
+    return read_group_bytes(g, 0, dest, count * sizeof(int16_t));
 }
 
-int EzApp::readInt32(Group g, uint32_t offset, int32_t &out)
+bool EzApp::write_group_int16(Group g, const int16_t *src, std::size_t count)
 {
-    if (check_bounds_cpp(g, offset, sizeof(int32_t)) != 0) return -1;
-    if (mutex_) xSemaphoreTake(mutex_, pdMS_TO_TICKS(200));
-    std::memcpy(&out, &groups_[g][offset], sizeof(int32_t));
-    if (mutex_) xSemaphoreGive(mutex_);
-    return 0;
+    return write_group_bytes(g, 0, src, count * sizeof(int16_t));
 }
 
-int EzApp::writeFloat(Group g, uint32_t offset, float value)
+bool EzApp::read_group_int32(Group g, int32_t *dest, std::size_t count)
 {
-    if (check_bounds_cpp(g, offset, sizeof(float)) != 0) return -1;
-    if (mutex_) xSemaphoreTake(mutex_, pdMS_TO_TICKS(200));
-    std::memcpy(&groups_[g][offset], &value, sizeof(float));
-    if (mutex_) xSemaphoreGive(mutex_);
-    return 0;
+    return read_group_bytes(g, 0, dest, count * sizeof(int32_t));
 }
 
-int EzApp::readFloat(Group g, uint32_t offset, float &out)
+bool EzApp::write_group_int32(Group g, const int32_t *src, std::size_t count)
 {
-    if (check_bounds_cpp(g, offset, sizeof(float)) != 0) return -1;
-    if (mutex_) xSemaphoreTake(mutex_, pdMS_TO_TICKS(200));
-    std::memcpy(&out, &groups_[g][offset], sizeof(float));
-    if (mutex_) xSemaphoreGive(mutex_);
-    return 0;
+    return write_group_bytes(g, 0, src, count * sizeof(int32_t));
 }
 
-// C compatibility wrappers
-extern "C" {
-int EzApp_init(void)
+bool EzApp::read_group_float(Group g, float *dest, std::size_t count)
 {
-    return EzApp::instance().init() ? 0 : -1;
+    return read_group_bytes(g, 0, dest, count * sizeof(float));
 }
 
-void EzApp_deinit(void)
+bool EzApp::write_group_float(Group g, const float *src, std::size_t count)
 {
-    EzApp::instance().deinit();
+    return write_group_bytes(g, 0, src, count * sizeof(float));
 }
 
-int EzApp_write_short(EzGroup group, uint32_t offset, short value)
+// Legacy-style offset-based single/multi-value helpers (byte offset)
+bool EzApp::writeInt8(Group g, uint32_t offset, int8_t v)
 {
-    return EzApp::instance().writeShort(static_cast<EzApp::Group>(group), offset, value);
+    return write_group_bytes(g, offset, &v, sizeof(v));
 }
 
-int EzApp_read_short(EzGroup group, uint32_t offset, short *out_value)
+bool EzApp::readInt8(Group g, uint32_t offset, int8_t &out)
 {
-    if (!out_value) return -1;
-    short tmp = 0;
-    int r = EzApp::instance().readShort(static_cast<EzApp::Group>(group), offset, tmp);
-    if (r == 0) *out_value = tmp;
-    return r;
+    return read_group_bytes(g, offset, &out, sizeof(out));
 }
 
-int EzApp_write_int16(EzGroup group, uint32_t offset, int16_t value)
+bool EzApp::writeInt16(Group g, uint32_t offset, int16_t v)
 {
-    return EzApp::instance().writeInt16(static_cast<EzApp::Group>(group), offset, value);
+    return write_group_bytes(g, offset, &v, sizeof(v));
 }
 
-int EzApp_read_int16(EzGroup group, uint32_t offset, int16_t *out_value)
+bool EzApp::readInt16(Group g, uint32_t offset, int16_t &out)
 {
-    if (!out_value) return -1;
-    int16_t tmp = 0;
-    int r = EzApp::instance().readInt16(static_cast<EzApp::Group>(group), offset, tmp);
-    if (r == 0) *out_value = tmp;
-    return r;
+    return read_group_bytes(g, offset, &out, sizeof(out));
 }
 
-int EzApp_write_int32(EzGroup group, uint32_t offset, int32_t value)
+bool EzApp::writeInt32(Group g, uint32_t offset, int32_t v)
 {
-    return EzApp::instance().writeInt32(static_cast<EzApp::Group>(group), offset, value);
+    return write_group_bytes(g, offset, &v, sizeof(v));
 }
 
-int EzApp_read_int32(EzGroup group, uint32_t offset, int32_t *out_value)
+bool EzApp::readInt32(Group g, uint32_t offset, int32_t &out)
 {
-    if (!out_value) return -1;
-    int32_t tmp = 0;
-    int r = EzApp::instance().readInt32(static_cast<EzApp::Group>(group), offset, tmp);
-    if (r == 0) *out_value = tmp;
-    return r;
+    return read_group_bytes(g, offset, &out, sizeof(out));
 }
 
-int EzApp_write_float(EzGroup group, uint32_t offset, float value)
+bool EzApp::writeFloat(Group g, uint32_t offset, float v)
 {
-    return EzApp::instance().writeFloat(static_cast<EzApp::Group>(group), offset, value);
+    return write_group_bytes(g, offset, &v, sizeof(v));
 }
 
-int EzApp_read_float(EzGroup group, uint32_t offset, float *out_value)
+bool EzApp::readFloat(Group g, uint32_t offset, float &out)
 {
-    if (!out_value) return -1;
-    float tmp = 0.0f;
-    int r = EzApp::instance().readFloat(static_cast<EzApp::Group>(group), offset, tmp);
-    if (r == 0) *out_value = tmp;
-    return r;
+    return read_group_bytes(g, offset, &out, sizeof(out));
 }
 
-// RTC C wrappers
-int EzApp_init_rtc(void)
+bool EzApp::writeInt16AtIndex(Group g, std::size_t index, int16_t v)
 {
-    return EzApp::instance().init_rtc() ? 0 : -1;
+    uint32_t offset = static_cast<uint32_t>(index * sizeof(int16_t));
+    return writeInt16(g, offset, v);
 }
 
-int EzApp_set_rtc_time(uint8_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second, uint8_t weekday)
+bool EzApp::readInt16AtIndex(Group g, std::size_t index, int16_t &out)
 {
-    return EzApp::instance().set_rtc_time(year, month, day, hour, minute, second, weekday) ? 0 : -1;
+    uint32_t offset = static_cast<uint32_t>(index * sizeof(int16_t));
+    return readInt16(g, offset, out);
 }
 
-int EzApp_log_entry(const char *msg)
+bool EzApp::read_group_value(Group g, std::size_t index, int16_t &out_value)
 {
-    if (!msg) return -1;
-    return -1; // log API removed
+    if (index * sizeof(int16_t) >= GROUP_SIZE) return false;
+    return read_group_int16(g, &out_value, 1);
 }
 
-} // extern "C"
+bool EzApp::write_group_value(Group g, std::size_t index, int16_t value)
+{
+    if (index * sizeof(int16_t) >= GROUP_SIZE) return false;
+    return write_group_int16(g, &value, 1);
+}

@@ -46,10 +46,25 @@ extern "C" void app_main(void)
 
     // start modular tasks
     start_ez_dio_task();
+    // start Y0 toggle test (cycles bits 0..7 on Y0 every 1s)
+    start_y0_toggle_test();
     start_modbus_task();
-    start_oxygen_task();
+    //start_oxygen_task();
     start_analog_task();
-    //
+
+
+    // // set D256 to 1234 in EzApp (index-based access)
+    // for (size_t i = 0; i < 500; i++) {
+    //     app.writeInt16AtIndex(EzApp::D, i, static_cast<int16_t>(i));
+    // }
+    // for (size_t i = 0; i < 500; i++) {
+    //     int16_t val = 0;
+    //     app.readInt16AtIndex(EzApp::D, i, val);
+    //     ESP_LOGI("EzApp", "D[%d] = %d", i, val);
+    // }
+    // ESP_LOGI("EzApp", "............");
+    ESP_LOGI("EzApp", "EzApp Started");
+    
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }

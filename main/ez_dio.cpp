@@ -31,6 +31,21 @@ static void ez_dio_task(void *arg)
         // 3) Read Y group offset 0 and write to PCF8574 outputs
         int16_t y = 0;
         app.readInt16(EzApp::Y, 0, y);
+
+        // Check D257 (byte-offset = 257*2 = 514) bits:
+        // - If bit1 == 1 -> clear Y0 (higher priority)
+        // - Else if bit0 == 1 -> set Y0
+        int16_t d257 = 0;
+        app.readInt16(EzApp::D, 257 * 2, d257);
+        if (d257 & 0x0002) {
+            y &= static_cast<int16_t>(~0x0001); // clear Y0
+        } else if (d257 & 0x0001) {
+            y |= 0x0001; // set Y0
+        }
+
+        // write updated Y back so other tasks see the forced state
+        app.writeInt16(EzApp::Y, 0, y);
+
         uint8_t out_byte = static_cast<uint8_t>(y & 0xFF);
         r = i2c_master_write_to_device(static_cast<i2c_port_t>(EzApp::I2C_PORT), EzApp::PCF_OUTPUT_ADDR, &out_byte, 1, pdMS_TO_TICKS(1000));
         if (r != ESP_OK) {
@@ -39,7 +54,21 @@ static void ez_dio_task(void *arg)
         // record DO (outputs) to D offset 526
         app.writeInt16(EzApp::D, 526, static_cast<int16_t>(out_byte));
         
-        vTaskDelay(pdMS_TO_TICKS(200));
+        // Periodically print 6 int16 values from D starting at D256 (byte offset = 256*2)
+        static int loop_cnt = 0;
+        loop_cnt++;
+        // if ((loop_cnt % 5) == 0) { // ~1s (5 * 200ms)
+        //     const uint32_t base = 256 * 2; // byte offset
+        //     int16_t vals[6];
+        //     for (int i = 0; i < 6; ++i) {
+        //         vals[i] = 0;
+        //         app.readInt16(EzApp::D, base + i * 2, vals[i]);
+        //     }
+        //     ESP_LOGI("kc868", "D[256*2..] 6 vals: %d, %d, %d, %d, %d, %d",
+        //              vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]);
+        // }
+
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
     vTaskDelete(NULL);
 }
@@ -47,4 +76,31 @@ static void ez_dio_task(void *arg)
 void start_ez_dio_task()
 {
     xTaskCreate(ez_dio_task, "ez_dio_task", EZ_TASK_STACK, NULL, 5, NULL);
+}
+
+// Y0 toggle test: cycles bits 0..7 of Y (offset 0) one bit at a time every 1 second.
+static void y0_toggle_task(void *arg)
+{
+    (void)arg;
+    EzApp &app = EzApp::instance();
+    int bit = 0;
+    while (1) {
+        // int16_t v = static_cast<int16_t>(1 << bit);
+        // app.writeInt16(EzApp::Y, 0, v);
+        // bit = (bit + 1) & 0x7; // cycle 0..7
+        // int16_t y_cur = 0;
+        // app.readInt16(EzApp::Y, 0, y_cur);
+        // ESP_LOGI("kc868", "Y0 toggle test set: 0x%02X", static_cast<unsigned int>(y_cur & 0xFF));
+        
+
+
+        
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    vTaskDelete(NULL);
+}
+
+void start_y0_toggle_test()
+{
+    xTaskCreate(y0_toggle_task, "y0_toggle", 2048, NULL, 5, NULL);
 }
