@@ -3,14 +3,48 @@
 #include "driver/i2c.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include <string.h>
 
 #define EZ_TASK_STACK 4096
+#define OXYGEN_SENSOR_ADDR 0x72
 
 static void ez_dio_task(void *arg)
 {
     (void)arg;
     EzApp &app = EzApp::instance();
+    int oxygen_counter = 0;  // counter for oxygen sensor reading
     while (1) {
+        
+        
+        
+        // Check D102; if 0, control Y0 bits 3-4 based on D132 bits 2-3
+        int16_t d102 = 0;
+        app.readInt16(EzApp::D, 102 * 2, d102);
+        if (d102 == 0) {
+            int16_t d132 = 0;
+            app.readInt16(EzApp::D, 132 * 2, d132);
+            int16_t y0 = 0;
+            app.readInt16(EzApp::Y, 0, y0);
+            
+            if (d132 & 0x0004) { // D132.2 == 1
+                y0 |= 0x0008;   // Y0.3 = 1
+                y0 &= ~0x0010;  // Y0.4 = 0
+            } else if (d132 & 0x0008) { // D132.3 == 1
+                y0 &= ~0x0008;  // Y0.3 = 0
+                y0 |= 0x0010;   // Y0.4 = 1
+            }
+            app.writeInt16(EzApp::Y, 0, y0);
+        }
+
+
+
+
+
+
+
+
+
+
         // 1) Increment D group at offset 0 (int32)
         int32_t d = 0;
         app.readInt32(EzApp::D, 0, d);
@@ -54,6 +88,26 @@ static void ez_dio_task(void *arg)
         // record DO (outputs) to D offset 526
         app.writeInt16(EzApp::D, 526, static_cast<int16_t>(out_byte));
         
+        // Read oxygen sensor every ~1 second (500 loops * 2ms = 1000ms)
+        oxygen_counter++;
+        if (oxygen_counter >= 500) {
+            oxygen_counter = 0;
+            uint8_t o2_buf[4];
+            esp_err_t o2_r = i2c_master_read_from_device(static_cast<i2c_port_t>(EzApp::I2C_PORT), 
+                                                          OXYGEN_SENSOR_ADDR, o2_buf, sizeof(o2_buf), 
+                                                          pdMS_TO_TICKS(500));
+            if (o2_r == ESP_OK) {
+                float val;
+                memcpy(&val, o2_buf, sizeof(val));
+                int32_t scaled = (int32_t)(val * 100.0f);
+                if (scaled < 0) scaled = 0;
+                if (scaled > 0xFFFF) scaled = 0xFFFF;
+                app.writeInt16(EzApp::D, EzApp::OXYGEN_OFFSET1, (int16_t)scaled);
+            } else {
+                ESP_LOGW("kc868", "O2 sensor read failed: %d", o2_r);
+            }
+        }
+        
         // Periodically print 6 int16 values from D starting at D256 (byte offset = 256*2)
         static int loop_cnt = 0;
         loop_cnt++;
@@ -67,6 +121,8 @@ static void ez_dio_task(void *arg)
         //     ESP_LOGI("kc868", "D[256*2..] 6 vals: %d, %d, %d, %d, %d, %d",
         //              vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]);
         // }
+
+
 
         vTaskDelay(pdMS_TO_TICKS(2));
     }

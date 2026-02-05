@@ -9,7 +9,6 @@
 #include "driver/uart.h"
 #include "ez_dio.h"
 #include "modbus.h"
-#include "oxygen.h"
 #include "analog.h"
 #include <stdlib.h>
 #include <string.h>
@@ -45,12 +44,11 @@ extern "C" void app_main(void)
     }
 
     // start modular tasks
-    start_ez_dio_task();
+    start_ez_dio_task();  // includes oxygen sensor reading
     // start Y0 toggle test (cycles bits 0..7 on Y0 every 1s)
     start_y0_toggle_test();
     start_modbus_master_task();
     //start_modbus_task(); // UART1 공유 불가: 슬레이브/마스터 동시 실행 금지
-    //start_oxygen_task();
     start_analog_task();
 // RS485 TXD: GPIO 27
 // RS485 RXD: GPIO 14 

@@ -321,6 +321,7 @@ static void modbus_master_task(void *arg)
                 int16_t v2 = ((int16_t)resp[5] << 8) | resp[6];
                 int16_t d140_val = 0;
                 EzApp::instance().readInt16(EzApp::D, 140, d140_val);
+                //
                 ESP_LOGI(TAG, "Modbus master RX success: Reg[%d]=%d,%d", start_addr, v, v2);
                 if (v2 != d140_val) {
                     int16_t write_val = d140_val / 10;
