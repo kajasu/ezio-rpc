@@ -2,3 +2,4 @@
 #include <stdint.h>
 
 void start_modbus_task();
+void start_modbus_master_task();

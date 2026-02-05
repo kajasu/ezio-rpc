@@ -48,9 +48,14 @@ extern "C" void app_main(void)
     start_ez_dio_task();
     // start Y0 toggle test (cycles bits 0..7 on Y0 every 1s)
     start_y0_toggle_test();
-    start_modbus_task();
+    start_modbus_master_task();
+    //start_modbus_task(); // UART1 공유 불가: 슬레이브/마스터 동시 실행 금지
     //start_oxygen_task();
     start_analog_task();
+// RS485 TXD: GPIO 27
+// RS485 RXD: GPIO 14 
+// // #define MODBUS_TX_PIN 32
+// // #define MODBUS_RX_PIN 33
 
 
     // // set D256 to 1234 in EzApp (index-based access)
