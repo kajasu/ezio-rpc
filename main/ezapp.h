@@ -5,6 +5,7 @@
 #include <stdint.h>
 #ifdef __cplusplus
 #include <cstddef>
+#include <cstdbool>
 // FreeRTOS mutex
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -42,8 +43,9 @@ public:
     static constexpr uint32_t MODBUS_WRITE_SRC_OFFSET = 512; // 30 x int16 source (60 bytes)
 
     // Restore oxygen offsets to overlap with Modbus write-source (user requested)
-    static constexpr uint32_t OXYGEN_OFFSET1 = 512; // uint16
-    static constexpr uint32_t OXYGEN_OFFSET2 = 514; // uint16
+    // NOTE: EzApp::writeInt16/readInt16 offsets are byte offsets.
+    static constexpr uint32_t OXYGEN_OFFSET1 = 114 * 2; // uint16 at D114 (byte offset)
+    static constexpr uint32_t OXYGEN_OFFSET2 = 115 * 2; // uint16 at D115 (byte offset)
 
 
     // Size per group
@@ -68,46 +70,62 @@ private:
     EzApp(const EzApp &) = delete;
     EzApp &operator=(const EzApp &) = delete;
 
-    int16_t *groups_[COUNT];
+    uint8_t *groups_[COUNT];
     bool initialized_;
     SemaphoreHandle_t mutex_; // protects read/write access to groups_
-    // Internal helpers for byte-level group access (private). `offset` is byte offset within group.
-    bool read_group_bytes(Group g, uint32_t offset, void *dest, std::size_t bytes);
-    bool write_group_bytes(Group g, uint32_t offset, const void *src, std::size_t bytes);
     
 public:
-    // Read/write typed elements from/to a group's raw storage. `count` is number of elements.
-    // All methods return false on failure (invalid group, out-of-bounds, not initialized).
-    bool read_group_int8(Group g, int8_t *dest, std::size_t count);
-    bool write_group_int8(Group g, const int8_t *src, std::size_t count);
+    // --- Single value read/write (byte offsets) ---
+    // NOTE: `offset` is a BYTE offset within the selected group.
+    bool readByte(Group g, std::size_t offset, uint8_t &out);
+    bool writeByte(Group g, std::size_t offset, uint8_t value);
 
-    bool read_group_int16(Group g, int16_t *dest, std::size_t count);
-    bool write_group_int16(Group g, const int16_t *src, std::size_t count);
+    bool readInt8(Group g, std::size_t offset, int8_t &out);
+    bool writeInt8(Group g, std::size_t offset, int8_t value);
 
-    bool read_group_int32(Group g, int32_t *dest, std::size_t count);
-    bool write_group_int32(Group g, const int32_t *src, std::size_t count);
+    bool readInt16(Group g, std::size_t offset, int16_t &out);
+    bool writeInt16(Group g, std::size_t offset, int16_t value);
 
-    bool read_group_float(Group g, float *dest, std::size_t count);
-    bool write_group_float(Group g, const float *src, std::size_t count);
+    bool readInt32(Group g, std::size_t offset, int32_t &out);
+    bool writeInt32(Group g, std::size_t offset, int32_t value);
 
-    // Legacy offset-based access (offset in bytes from start of group)
-    bool writeInt8(Group g, uint32_t offset, int8_t v);
-    bool readInt8(Group g, uint32_t offset, int8_t &out);
-    bool writeInt16(Group g, uint32_t offset, int16_t v);
-    bool readInt16(Group g, uint32_t offset, int16_t &out);
-    bool writeInt32(Group g, uint32_t offset, int32_t v);
-    bool readInt32(Group g, uint32_t offset, int32_t &out);
-    bool writeFloat(Group g, uint32_t offset, float v);
-    bool readFloat(Group g, uint32_t offset, float &out);
+    bool readFloat(Group g, std::size_t offset, float &out);
+    bool writeFloat(Group g, std::size_t offset, float value);
 
-    // Element-index based helpers (index is element index, not byte offset)
-    bool writeInt16AtIndex(Group g, std::size_t index, int16_t v);
-    bool readInt16AtIndex(Group g, std::size_t index, int16_t &out);
+    // --- Index helpers (int16 index) ---
+    // `index` is an int16 element index (i.e., index 0 => offset 0, index 1 => offset 2).
+    bool readInt16AtIndex(Group g, uint32_t index, int16_t &out);
+    bool writeInt16AtIndex(Group g, uint32_t index, int16_t value);
 
-    // Convenience single-element accessors. Return false if out of range or not initialized.
-    bool read_group_value(Group g, std::size_t index, int16_t &out_value);
-    bool write_group_value(Group g, std::size_t index, int16_t value);
-    
+    // --- Group read/write (arrays) ---
+    // Arrays use BYTE offset; element size is implied by type.
+    bool readBytes(Group g, std::size_t offset, void *out, std::size_t len);
+    bool writeBytes(Group g, std::size_t offset, const void *data, std::size_t len);
+
+    bool readByteArray(Group g, std::size_t offset, uint8_t *out, std::size_t count);
+    bool writeByteArray(Group g, std::size_t offset, const uint8_t *data, std::size_t count);
+
+    bool readInt8Array(Group g, std::size_t offset, int8_t *out, std::size_t count);
+    bool writeInt8Array(Group g, std::size_t offset, const int8_t *data, std::size_t count);
+
+    bool readInt16Array(Group g, std::size_t offset, int16_t *out, std::size_t count);
+    bool writeInt16Array(Group g, std::size_t offset, const int16_t *data, std::size_t count);
+
+    bool readInt32Array(Group g, std::size_t offset, int32_t *out, std::size_t count);
+    bool writeInt32Array(Group g, std::size_t offset, const int32_t *data, std::size_t count);
+
+    bool readFloatArray(Group g, std::size_t offset, float *out, std::size_t count);
+    bool writeFloatArray(Group g, std::size_t offset, const float *data, std::size_t count);
+
+    // --- Bit read/write ---
+    // Bit addressing is within the group, bit 0 == LSB of byte 0.
+    bool readBit(Group g, uint32_t bitIndex, bool &out);
+    bool writeBit(Group g, uint32_t bitIndex, bool value);
+
+    // Packed bit array I/O. Bits are packed LSB-first in each output byte.
+    // `outPackedBytes` must be at least (bitCount+7)/8.
+    bool readBitsPacked(Group g, uint32_t startBit, uint32_t bitCount, uint8_t *outPackedBytes, std::size_t outPackedLen);
+    bool writeBitsPacked(Group g, uint32_t startBit, uint32_t bitCount, const uint8_t *packedBytes, std::size_t packedLen);
 };
 
 #endif // __cplusplus
