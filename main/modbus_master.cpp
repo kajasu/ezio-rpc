@@ -8,6 +8,12 @@
 #include "freertos/task.h"
 #include <stdlib.h>
 #include <string.h>
+#include "nvs_flash.h"
+#include "nvs.h"
+
+// forward declarations for NVS helpers (defined below)
+esp_err_t save_d130_region_to_nvs();
+esp_err_t load_d130_region_from_nvs();
 
 static const char *TAG = "modbus";
 // UART pins and settings for Modbus RTU slave
@@ -190,7 +196,7 @@ static void modbus_master_task(void *arg)
                 consecutive_timeouts = 0;
                 cur_period = period_ok;
                 int16_t v = ((int16_t)resp[3] << 8) | resp[4];
-                int16_t v2 = ((int16_t)resp[5] << 8) | resp[6];
+                int16_t v2 = (((int16_t)resp[5] << 8) | resp[6])*10;
                 v *= 10;
                 // EzApp offsets are bytes, so D110 => 110*2
                 EzApp::instance().writeInt16(EzApp::D, 110 * 2, v);
@@ -200,7 +206,7 @@ static void modbus_master_task(void *arg)
                 //
                 //ESP_LOGI(TAG, "Modbus master RX success: Reg[%d]=%d,%d", start_addr, v, v2);
                 if (v2 != d140_val) {
-                    ESP_LOGI(TAG, "Modbus master: D140 changed (D140=%d) writing new value to slave", d140_val);
+                    ESP_LOGI(TAG, "Modbus master: D140 changed (D140=%d) (sp=%d)writing new value to slave", d140_val, v2);
                     int16_t write_val = d140_val / 10;
                     uint8_t data[4];
                     data[0] = (write_val >> 8) & 0xFF;
@@ -209,6 +215,12 @@ static void modbus_master_task(void *arg)
                     int write_len = build_modbus_fc10_request(slave_id, 300, 1, data, write_req, sizeof(write_req));
                     if (write_len > 0) {
                         uart_write_bytes_blocking(uart_num, write_req, write_len, pdMS_TO_TICKS(200));
+                    }
+
+                    // Persist D130..D159 (30 registers) to NVS so we can restore them on next boot.
+                    esp_err_t save_err = save_d130_region_to_nvs();
+                    if (save_err != ESP_OK) {
+                        ESP_LOGW(TAG, "Modbus master: failed to persist D130..D159: %s", esp_err_to_name(save_err));
                     }
                 }
             } else {
@@ -235,10 +247,84 @@ static void modbus_master_task(void *arg)
     vTaskDelete(NULL);
 }
 
+// Persist 30 int16 D-registers starting at D130 into NVS under key "d130_30".
+esp_err_t save_d130_region_to_nvs()
+{
+    const int count = 30;
+    int16_t vals[count];
+    for (int i = 0; i < count; ++i) {
+        int16_t v = 0;
+        EzApp::instance().readInt16(EzApp::D, (130 + i) * 2, v);
+        vals[i] = v;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("modbus", NVS_READWRITE, &handle);
+    if (err == ESP_ERR_NVS_NOT_INITIALIZED) {
+        nvs_flash_init();
+        err = nvs_open("modbus", NVS_READWRITE, &handle);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "save_d130_region_to_nvs: nvs_open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_blob(handle, "d130_30", vals, sizeof(vals));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "save_d130_region_to_nvs: nvs_set_blob/commit failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "save_d130_region_to_nvs: persisted %d registers from D130", count);
+    }
+    return err;
+}
+
+// Load 30 int16 D-registers from NVS key "d130_30" and write into EzApp D registers starting at D130.
+esp_err_t load_d130_region_from_nvs()
+{
+    const int count = 30;
+    int16_t vals[count];
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("modbus", NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_INITIALIZED) {
+        nvs_flash_init();
+        err = nvs_open("modbus", NVS_READONLY, &handle);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "load_d130_region_from_nvs: nvs_open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    size_t required = 0;
+    err = nvs_get_blob(handle, "d130_30", NULL, &required);
+    if (err != ESP_OK || required != sizeof(vals)) {
+        nvs_close(handle);
+        ESP_LOGI(TAG, "load_d130_region_from_nvs: no saved region or size mismatch (%s)", esp_err_to_name(err));
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    err = nvs_get_blob(handle, "d130_30", vals, &required);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "load_d130_region_from_nvs: read failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        EzApp::instance().writeInt16(EzApp::D, (130 + i) * 2, vals[i]);
+    }
+    ESP_LOGI(TAG, "load_d130_region_from_nvs: restored %d registers into D130..D%d", count, 130 + count - 1);
+    return ESP_OK;
+}
+
 void start_modbus_master_task()
 {
     // Ensure UART is configured for master polling (TX=GPIO27, RX=GPIO14) at requested baud.
     // Note: UART1 cannot be shared by slave+master simultaneously.
+    // Attempt to restore any previously persisted D130..D159 values into EzApp before starting.
+    (void)load_d130_region_from_nvs();
+
     uart_driver_delete(MODBUS_UART_NUM);
 
     uart_config_t uart_config;

@@ -126,6 +126,13 @@ public:
     // `outPackedBytes` must be at least (bitCount+7)/8.
     bool readBitsPacked(Group g, uint32_t startBit, uint32_t bitCount, uint8_t *outPackedBytes, std::size_t outPackedLen);
     bool writeBitsPacked(Group g, uint32_t startBit, uint32_t bitCount, const uint8_t *packedBytes, std::size_t packedLen);
+
+    // --- Persistence helpers (store/read group region metadata to flash/NVS) ---
+    // Persist a region descriptor identified by `regionId` (0..255). Returns true on success.
+    bool persistRegionDescriptor(uint8_t regionId, Group g, uint32_t startOffsetBytes, uint32_t countBytes);
+
+    // Read a persisted region descriptor. Returns true if the entry exists and was read successfully.
+    bool loadRegionDescriptor(uint8_t regionId, Group &outGroup, uint32_t &outStartOffsetBytes, uint32_t &outCountBytes);
 };
 
 #endif // __cplusplus

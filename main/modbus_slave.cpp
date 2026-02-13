@@ -351,7 +351,7 @@ static void modbus_slave_task(void *arg)
                         }
                     } else if (func == 0x06) {
                         // Write Single Register
-                        ESP_LOGI(TAG, "Write Single Register: addr=%u val=%d ", addr, (int16_t)((data[0] << 8) | data[1]));
+                        ESP_LOGI(TAG, "Write Single Register: addr=%u val=%d (0x%04X)", addr, (int16_t)((data[0] << 8) | data[1]), (uint16_t)((data[0] << 8) | data[1]));
                         if (!data || data_len != 2) {
                             send_modbus_exception(uart_num, MODBUS_UNIT_ID, func, 0x03); // Illegal Data Value
                         } else {

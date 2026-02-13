@@ -43,7 +43,8 @@ extern "C" void app_main(void)
     } else {
         ESP_LOGI("EzApp", "EzApp initialized");
     }
-
+    
+    load_d130_region_from_nvs();
     // start modular tasks 
     start_ez_dio_task();  // includes oxygen sensor reading
     start_modbus_master_task();

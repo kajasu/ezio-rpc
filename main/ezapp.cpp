@@ -7,11 +7,101 @@
 #include "driver/i2c.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 EzApp &EzApp::instance()
 {
     static EzApp inst;
     return inst;
+}
+
+// Persist/load region descriptor helpers (NVS)
+bool EzApp::persistRegionDescriptor(uint8_t regionId, Group g, uint32_t startOffsetBytes, uint32_t countBytes)
+{
+    if (regionId == 0 && regionId > 255) return false; // trivial guard (uint8_t always 0..255)
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // try erase + init
+        (void)nvs_flash_erase();
+        err = nvs_flash_init();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW("EzApp", "NVS init failed: %d", err);
+        return false;
+    }
+
+    nvs_handle_t handle;
+    err = nvs_open("ezapp", NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW("EzApp", "nvs_open failed: %d", err);
+        return false;
+    }
+
+    char key_g[32];
+    char key_off[32];
+    char key_cnt[32];
+    snprintf(key_g, sizeof(key_g), "reg%u_g", regionId);
+    snprintf(key_off, sizeof(key_off), "reg%u_off", regionId);
+    snprintf(key_cnt, sizeof(key_cnt), "reg%u_cnt", regionId);
+
+    err = nvs_set_u32(handle, key_g, static_cast<uint32_t>(g));
+    if (err == ESP_OK) err = nvs_set_u32(handle, key_off, startOffsetBytes);
+    if (err == ESP_OK) err = nvs_set_u32(handle, key_cnt, countBytes);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW("EzApp", "persistRegionDescriptor failed: %d", err);
+        return false;
+    }
+    return true;
+}
+
+bool EzApp::loadRegionDescriptor(uint8_t regionId, Group &outGroup, uint32_t &outStartOffsetBytes, uint32_t &outCountBytes)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        (void)nvs_flash_erase();
+        err = nvs_flash_init();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW("EzApp", "NVS init failed: %d", err);
+        return false;
+    }
+
+    nvs_handle_t handle;
+    err = nvs_open("ezapp", NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW("EzApp", "nvs_open failed: %d", err);
+        return false;
+    }
+
+    char key_g[32];
+    char key_off[32];
+    char key_cnt[32];
+    snprintf(key_g, sizeof(key_g), "reg%u_g", regionId);
+    snprintf(key_off, sizeof(key_off), "reg%u_off", regionId);
+    snprintf(key_cnt, sizeof(key_cnt), "reg%u_cnt", regionId);
+
+    uint32_t gval = 0;
+    uint32_t off = 0;
+    uint32_t cnt = 0;
+    err = nvs_get_u32(handle, key_g, &gval);
+    if (err != ESP_OK) { nvs_close(handle); return false; }
+    err = nvs_get_u32(handle, key_off, &off);
+    if (err != ESP_OK) { nvs_close(handle); return false; }
+    err = nvs_get_u32(handle, key_cnt, &cnt);
+    if (err != ESP_OK) { nvs_close(handle); return false; }
+
+    nvs_close(handle);
+    if (gval > static_cast<uint32_t>(COUNT - 1)) {
+        ESP_LOGW("EzApp", "loadRegionDescriptor: stored group out of range: %u", gval);
+        return false;
+    }
+    outGroup = static_cast<Group>(gval);
+    outStartOffsetBytes = off;
+    outCountBytes = cnt;
+    return true;
 }
 
 EzApp::EzApp()
