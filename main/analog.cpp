@@ -31,6 +31,13 @@ static void analog_task(void *arg)
     dac_output_enable(DAC_CHAN_0); // GPIO25 (DA2)
     dac_output_enable(DAC_CHAN_1); // GPIO26 (DA1)
 
+    // D111용 이동평균 버퍼 (윈도우 크기)
+    static const int MA_WINDOW = 40; // 이동평균 윈도우 크기
+    static int32_t ma_buf[MA_WINDOW] = {0};
+    static int ma_idx = 0;
+    static int ma_count = 0;
+    static int32_t ma_sum = 0;
+
     while (1) {
         // Read A1 (ADC1_CH0 -> GPIO36)
         int raw1 = 0;
@@ -45,17 +52,30 @@ static void analog_task(void *arg)
         if (raw2 > 4095) raw2 = 4095;
         // EzApp offsets are BYTES, so D112 => 112*2
         //app.writeInt16(EzApp::D, 112 * 2, static_cast<int16_t>(raw1));
-        int d111 = (raw1 - 240) * 1000 / (1825 - 240); // 0~1000
-        // if (d111 < 0) d111 = 0;
-        // if (d111 > 1000) d111 = 1000;
-        app.writeInt16(EzApp::D, 111 * 2, static_cast<int16_t>(d111));
+        // raw1: 0..4095 -> -200..1000으로 선형 변환
+        // 변환식: out = raw1 * 1200 / 4095 - 200
+        int32_t tmp = static_cast<int32_t>(raw1) * 1200;
+        int d111 = static_cast<int>(tmp / 4095) - 200;
+        if (d111 < -200) d111 = -200;
+        if (d111 > 1000) d111 = 1000;
 
+        // 이동평균 적용 (간단한 순환 버퍼)
+        int replaced = ma_buf[ma_idx];
+        ma_sum = ma_sum - replaced + d111;
+        ma_buf[ma_idx] = d111;
+        ma_idx = (ma_idx + 1) % MA_WINDOW;
+        if (ma_count < MA_WINDOW) ma_count++;
+        int d111_avg = static_cast<int>(ma_sum / (ma_count == 0 ? 1 : ma_count));
+
+        app.writeInt16(EzApp::D, 111 * 2, static_cast<int16_t>(d111_avg));
+
+/*
         // Read D 10 and D 12 (int16) and output to DAC1/2
         int16_t v10 = 0;
         int16_t v12 = 0;
         app.readInt16(EzApp::D, 10, v10);
         app.readInt16(EzApp::D, 12, v12);
-
+        
         // Map int16 (-32768..32767) to 0..255 for DAC
         auto map_to_dac = [](int16_t val)->uint8_t {
             int32_t shifted = static_cast<int32_t>(val) + 32768; // 0..65535
@@ -71,10 +91,9 @@ static void analog_task(void *arg)
         // Note: user mapping: DA1=GPIO26 (DAC_CHANNEL_2), DA2=GPIO25 (DAC_CHANNEL_1)
         dac_output_voltage(DAC_CHAN_1, dac_val1);
         dac_output_voltage(DAC_CHAN_0, dac_val2);
+  */
         //ESP_LOGI("analog", "A1 raw value: %d", raw1);
-
-
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     vTaskDelete(NULL);
 }

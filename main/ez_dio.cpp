@@ -5,6 +5,7 @@
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
 #include "DFRobot_EOxygenSensor.h"
+#include "SparkFun_SCD30_Arduino_Library.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -33,21 +34,21 @@ static const char *TAG = "DIO";
 
 #define EZ_TASK_STACK 4096
 
-// Offset for voice output number (D-register byte offset)
+// 음성 출력 번호 오프셋 (D 레지스터 바이트 오프셋)
 static constexpr int voice_out_no_addr = 109 * 2;
-// Address for curing step D-register (byte offset)
+// 치료 단계 D 레지스터 주소 (바이트 오프셋)
 static constexpr int curing_step_addr = 102 * 2;
 
 
 
-static adc_channel_t adc_ch1 = ADC_CHANNEL_0; // GPIO36 (ADC1)
-static adc_channel_t adc_ch2 = ADC_CHANNEL_3; // GPIO39 (ADC1)
-static adc_channel_t adc_ch3 = ADC_CHANNEL_6; // GPIO34 (ADC1)
-static adc_channel_t adc_ch4 = ADC_CHANNEL_7; // GPIO35 (ADC1)
+static adc_channel_t adc_ch1 = ADC_CHANNEL_0; // ADC 채널 0 -> GPIO36 (ADC1)
+static adc_channel_t adc_ch2 = ADC_CHANNEL_3; // ADC 채널 3 -> GPIO39 (ADC1)
+static adc_channel_t adc_ch3 = ADC_CHANNEL_6; // ADC 채널 6 -> GPIO34 (ADC1)
+static adc_channel_t adc_ch4 = ADC_CHANNEL_7; // ADC 채널 7 -> GPIO35 (ADC1)
 
 // I2C helper functions removed (oxygen sensor code deleted)
 
-// I2C bus scanner: scans all possible 7-bit addresses and reports found devices
+// I2C 버스 스캐너: 가능한 7비트 주소(0x03~0x77)를 스캔하여 장치가 있으면 로그로 보고
 static void i2c_scan_bus(i2c_port_t port, const char *port_name)
 {
     ESP_LOGI(TAG, "Scanning I2C bus on %s...", port_name);
@@ -75,81 +76,124 @@ static void i2c_scan_bus(i2c_port_t port, const char *port_name)
     }
 }
 
-// Oxygen sensor task: reads E-Oxygen sensor and writes to D114
+// 다중 센서 태스크: SCD30(CO2/온도/습도) 및 E-Oxygen(산소) 센서를 읽음
 static void oxygen_sensor_task(void *arg)
 {
     (void)arg;
     EzApp &app = EzApp::instance();
     
-    // Configure separate I2C port for oxygen sensor (I2C_NUM_1)
+    // 센서용 별도 I2C 포트 설정 (I2C_NUM_1)
     // GPIO 5 = SCL, GPIO 22 = SDA
-    const i2c_port_t OXYGEN_I2C_PORT = I2C_NUM_1;
-    const int OXYGEN_SDA_IO = 22;
-    const int OXYGEN_SCL_IO = 5;
+    const i2c_port_t SENSOR_I2C_PORT = I2C_NUM_1;
+    const int SENSOR_SDA_IO = 22;
+    const int SENSOR_SCL_IO = 5;
     
     i2c_config_t conf = {};
     conf.mode = I2C_MODE_MASTER;
-    conf.sda_io_num = OXYGEN_SDA_IO;
-    conf.scl_io_num = OXYGEN_SCL_IO;
+    conf.sda_io_num = SENSOR_SDA_IO;
+    conf.scl_io_num = SENSOR_SCL_IO;
     conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
     conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.master.clk_speed = 100000; // 100kHz for oxygen sensor
+    conf.master.clk_speed = 50000; // 50kHz (slower for better reliability)
+    conf.clk_flags = 0; // Use default clock source
     
-    esp_err_t i2c_err = i2c_param_config(OXYGEN_I2C_PORT, &conf);
+    esp_err_t i2c_err = i2c_param_config(SENSOR_I2C_PORT, &conf);
     if (i2c_err == ESP_OK) {
-        i2c_err = i2c_driver_install(OXYGEN_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
+        i2c_err = i2c_driver_install(SENSOR_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
     }
     
     if (i2c_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize I2C for oxygen sensor: %d", i2c_err);
+        ESP_LOGE(TAG, "Failed to initialize I2C for sensors: %d", i2c_err);
         vTaskDelete(NULL);
         return;
     }
     
-    ESP_LOGI(TAG, "Oxygen sensor I2C initialized on port %d (SDA=%d, SCL=%d)", 
-             OXYGEN_I2C_PORT, OXYGEN_SDA_IO, OXYGEN_SCL_IO);
+    // Set I2C timeout for clock stretching support
+    i2c_set_timeout(SENSOR_I2C_PORT, 0xFFFFF); // Max timeout for clock stretching
     
-    // Scan I2C bus to find devices
-    i2c_scan_bus(OXYGEN_I2C_PORT, "I2C_NUM_1 (Oxygen)");
+    ESP_LOGI(TAG, "Sensor I2C initialized on port %d (SDA=%d, SCL=%d)", 
+             SENSOR_I2C_PORT, SENSOR_SDA_IO, SENSOR_SCL_IO);
     
-    // Initialize oxygen sensor on dedicated I2C port with address 0x70
-    DFRobot_EOxygenSensor_I2C oxygen(OXYGEN_I2C_PORT, E_OXYGEN_ADDRESS_3);
+    // I2C 버스 스캔으로 연결된 장치 확인
+    i2c_scan_bus(SENSOR_I2C_PORT, "I2C_NUM_1 (Sensors)");
     
-    // Try to connect to sensor
-    esp_err_t err = oxygen.begin();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "E-Oxygen sensor not found, task will retry...");
+    // SCD30 CO2 센서 초기화
+    SCD30 airSensor;
+    bool scd30_available = false;
+    esp_err_t err = airSensor.begin(SENSOR_I2C_PORT, false, true);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "SCD30 sensor initialized successfully");
+        scd30_available = true;
+    } else {
+        ESP_LOGW(TAG, "SCD30 sensor not detected");
     }
     
-    // Give sensor time to stabilize
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    // DFRobot E-Oxygen 센서 초기화 (주소 0x70)
+    DFRobot_EOxygenSensor_I2C oxygenSensor(SENSOR_I2C_PORT, E_OXYGEN_ADDRESS_3);
+    bool oxygen_available = false;
+    err = oxygenSensor.begin();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "E-Oxygen sensor initialized successfully");
+        oxygen_available = true;
+    } else {
+        ESP_LOGW(TAG, "E-Oxygen sensor not detected");
+    }
+    
+    // 센서 안정화 대기
+    ESP_LOGI(TAG, "센서 안정화 대기...");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    
+    int wait_count = 0;
+    int read_cycle = 0; // Counter to stagger reads
     
     while (1) {
-        // Read oxygen concentration (returns % VOL)
-        float o2_percent = oxygen.readOxygenConcentration();
-        
-        // Convert to int16 (scaled by 10 for 0.1% precision)
-        // e.g., 20.9% becomes 209
-        int16_t o2_val = static_cast<int16_t>(o2_percent * 100.0f);
-        
-        // Write to D114 register
-        app.writeInt16(EzApp::D, 114 * 2, o2_val);
-        ESP_LOGI(TAG, "O2 : %.2f", o2_val);
-        // Log periodically (every 10 readings)
-        static int log_counter = 0;
-        if (++log_counter >= 10) {
-            ESP_LOGI(TAG, "O2 concentration: %.2f%% VOL (D114=%d)", o2_percent, o2_val);
-            log_counter = 0;
+        // SCD30는 기본적으로 2초마다 데이터가 준비되므로 주기적으로 읽음
+            if (scd30_available && airSensor.dataAvailable()) {
+            uint16_t co2_ppm = airSensor.getCO2();
+            float temp_c = airSensor.getTemperature();
+            float humidity_pct = airSensor.getHumidity();
+            
+            ESP_LOGI(TAG, "SCD30 - co2: %u ppm, temp: %.1f°C, humidity: %.1f%%", 
+                     co2_ppm, temp_c, humidity_pct);
+            
+            // Write to D registers:
+            // D114: CO2 (ppm)
+            // D115: Temperature (scaled by 10, e.g., 25.3°C = 253)
+            // D116: Humidity (scaled by 10, e.g., 45.2% = 452)
+            app.writeInt16(EzApp::D, 113 * 2, static_cast<int16_t>(co2_ppm));
+            //app.writeInt16(EzApp::D, 115 * 2, static_cast<int16_t>(temp_c * 10.0f));
+            app.writeInt16(EzApp::D, 112 * 2, static_cast<int16_t>(humidity_pct * 100.0f));
+            wait_count = 0;
+        } else if (scd30_available) {
+            if (++wait_count % 5 == 1) {
+                ESP_LOGI(TAG, "Waiting for new data from SCD30...");
+            }
         }
         
-        // Read every 5 seconds to reduce I2C bus usage
+        // E-Oxygen 센서 읽기 (I2C 충돌을 피하기 위해 타이밍을 분산시켜 호출)
+        if (oxygen_available) {
+            float o2_percent = oxygenSensor.readOxygenConcentration();
+            
+            // Convert to int16 (scaled by 100 for 0.01% precision)
+            // e.g., 20.95% becomes 2095
+            int16_t o2_val = static_cast<int16_t>(o2_percent * 100.0f);
+            
+            ESP_LOGI(TAG, "E-Oxygen - O2: %.2f%% (D117=%d)", o2_percent, o2_val);
+            
+            // Write to D117 register
+            app.writeInt16(EzApp::D, 114 * 2, o2_val);
+        }
+        
+        read_cycle++;
+        
+        // SCD30 has data ready every 2 seconds by default
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
     
     vTaskDelete(NULL);
 }
 
-// Control logic extracted from main loop for readability and testability.
+    // 제어 로직: 가독성과 테스트 용이성을 위해 메인 루프에서 분리됨
 static int16_t ez_dio_control_idle_state(EzApp &app, int16_t d131 , int16_t d132, int16_t x0, int16_t y0)
 {
 
@@ -365,22 +409,22 @@ static void ez_dio_task(void *arg)
     //          adc_ch4, adc1_u1_channel_to_gpio(adc_ch4));
     (void)arg;
     EzApp &app = EzApp::instance();
-    // Loop timing stats (microseconds)
+    // 루프 타이밍 통계 (마이크로초)
     static uint64_t loop_sum_us = 0;
     static uint32_t loop_min_us = UINT32_MAX;
     static uint32_t loop_max_us = 0;
     static uint32_t loop_count = 0;
     static int64_t last_report_time_us = 0;
-    // Per-section timing stats (A..E) in microseconds
-    // A: D increment
+    // 섹션별 타이밍 통계 (A..D) - 마이크로초
+    // A: D 그룹 증가
     static uint64_t secA_sum_us = 0; static uint32_t secA_min_us = UINT32_MAX; static uint32_t secA_max_us = 0; static uint32_t secA_count = 0;
-    // B: PCF8574 read + X/D100 writes
+    // B: PCF8574 입력 읽기 + X/D100 쓰기
     static uint64_t secB_sum_us = 0; static uint32_t secB_min_us = UINT32_MAX; static uint32_t secB_max_us = 0; static uint32_t secB_count = 0;
-    // C: read D group + control logic
+    // C: D 그룹 읽기 + 제어 로직
     static uint64_t secC_sum_us = 0; static uint32_t secC_min_us = UINT32_MAX; static uint32_t secC_max_us = 0; static uint32_t secC_count = 0;
-    // D: Y write + PCF8574 output write + D101
+    // D: Y 쓰기 + PCF8574 출력 쓰기 + D101 기록
     static uint64_t secD_sum_us = 0; static uint32_t secD_min_us = UINT32_MAX; static uint32_t secD_max_us = 0; static uint32_t secD_count = 0;
-    // Note: oxygen reads moved to separate task; per-loop 'E' stats removed.
+    // 참고: 산소 센서 읽기는 별도 태스크로 이동하여 루프 내 E 섹션 통계는 제거됨.
 
     // Oxygen sensor reads are handled in a separate task started below.
     // Initialize shared ADC manager once (safe to call repeatedly).
@@ -389,19 +433,19 @@ static void ez_dio_task(void *arg)
         ESP_LOGE(TAG, "adc_mgr_init failed: %d", adc_init_err);
     }
     
-    // Scan I2C_NUM_0 bus for PCF8574 and other devices
+    // I2C_NUM_0 버스에서 PCF8574 및 기타 장치 스캔
     static bool i2c_scanned = false;
     if (!i2c_scanned) {
         i2c_scan_bus(static_cast<i2c_port_t>(EzApp::I2C_PORT), "I2C_NUM_0 (PCF8574)");
         i2c_scanned = true;
     }
     
-    // Start oxygen sensor task to read E-Oxygen sensor
-    static bool oxygen_task_started = false;
-    if (!oxygen_task_started) {
-        xTaskCreate(oxygen_sensor_task, "oxygen_sensor", 4096, NULL, 4, NULL);
-        oxygen_task_started = true;
-        ESP_LOGI(TAG, "E-Oxygen sensor task started");
+    // 다중 센서 태스크 시작 (SCD30, E-Oxygen)
+    static bool sensor_task_started = false;
+    if (!sensor_task_started) {
+        xTaskCreate(oxygen_sensor_task, "multi_sensor", 4096, NULL, 4, NULL);
+        sensor_task_started = true;
+        ESP_LOGI(TAG, "다중 센서 태스크 시작 (SCD30 + E-Oxygen)");
     }
     
     int loop_cnt = 0;
@@ -502,13 +546,13 @@ static void ez_dio_task(void *arg)
             double avgB = secB_count ? ((double)secB_sum_us / (double)secB_count) : 0.0;
             double avgC = secC_count ? ((double)secC_sum_us / (double)secC_count) : 0.0;
             double avgD = secD_count ? ((double)secD_sum_us / (double)secD_count) : 0.0;
-            // ESP_LOGI(TAG, "Sections A..B (us): A min=%u max=%u avg=%.1f cnt=%u | B min=%u max=%u avg=%.1f cnt=%u",
-            //          secA_min_us, secA_max_us, avgA, secA_count,
-            //          secB_min_us, secB_max_us, avgB, secB_count);
-            // ESP_LOGI(TAG, "Sections C..D (us): C min=%u max=%u avg=%.1f cnt=%u | D min=%u max=%u avg=%.1f cnt=%u",
-            //          secC_min_us, secC_max_us, avgC, secC_count,
-            //          secD_min_us, secD_max_us, avgD, secD_count);
-            // reset loop stats
+            ESP_LOGI(TAG, "Sections A..B (us): A min=%u max=%u avg=%.1f cnt=%u | B min=%u max=%u avg=%.1f cnt=%u",
+                     secA_min_us, secA_max_us, avgA, secA_count,
+                     secB_min_us, secB_max_us, avgB, secB_count);
+            ESP_LOGI(TAG, "Sections C..D (us): C min=%u max=%u avg=%.1f cnt=%u | D min=%u max=%u avg=%.1f cnt=%u",
+                     secC_min_us, secC_max_us, avgC, secC_count,
+                     secD_min_us, secD_max_us, avgD, secD_count);
+            //reset loop stats
             loop_sum_us = 0;
             loop_min_us = UINT32_MAX;
             loop_max_us = 0;
@@ -521,9 +565,8 @@ static void ez_dio_task(void *arg)
             secD_sum_us = 0; secD_min_us = UINT32_MAX; secD_max_us = 0; secD_count = 0;
             // E (oxygen) handled in oxygen_task and logged separately by sensor code
         }
-        // Short delay to allow RTOS scheduling and I2C/ADC activity.
-        // Use 2ms as the shortest reasonable loop considering I2C/ADC access
-        // (oxygen sampling logic expects ~2ms loop: 50 * 2ms => ~100ms sampling).
+        // RTOS 스케줄링 및 I2C/ADC 활동을 허용하기 위한 짧은 딜레이
+        // I2C/ADC 접근을 고려할 때 2ms가 최소 합리적 루프 딜레이
         vTaskDelay(pdMS_TO_TICKS(2));
     }
     vTaskDelete(NULL);
