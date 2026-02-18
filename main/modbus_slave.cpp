@@ -359,6 +359,7 @@ static void modbus_slave_task(void *arg)
                             uint32_t off = (uint32_t)addr * 2u;
                             //ESP_LOGI(TAG, "FC06 Write: addr=%u val=%d off=%u", addr, val, off);
                             if (!app.writeInt16(EzApp::D, off, val)) {
+                                ESP_LOGI(TAG, "FC06 Write failed: addr=%u val=%d off=%u", addr, val, off);
                                 send_modbus_exception(uart_num, MODBUS_UNIT_ID, func, 0x02); // Illegal Data Address
                             } else {
                                 uint8_t resp[8];

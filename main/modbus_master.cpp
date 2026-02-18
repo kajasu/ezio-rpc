@@ -11,18 +11,16 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 
-// forward declarations for NVS helpers (defined below)
-esp_err_t save_d130_region_to_nvs();
-esp_err_t load_d130_region_from_nvs();
+// NVS helpers moved into EzApp methods
 
 static const char *TAG = "modbus";
-// UART pins and settings for Modbus RTU slave
+// Modbus RTU 마스터/슬레이브에 사용하는 UART 핀 및 설정
 #define MODBUS_UART_NUM UART_NUM_1
 #define MODBUS_TX_PIN 27
 #define MODBUS_RX_PIN 14
 
 #define MODBUS_BAUDRATE 19200
-// Slave unit id
+// 슬레이브 장치의 유닛 ID (필요시 사용)
 #define MODBUS_UNIT_ID 1
 #define MODBUS_SLAVE_UART_NUM UART_NUM_2
 #define MODBUS_SLAVE_BAUDRATE 115200
@@ -30,7 +28,8 @@ static const char *TAG = "modbus";
 #define MODBUS_SLAVE_RX_PIN 33
 
 
-// Optional DE (driver enable) pin for RS485 transceiver; set to -1 if not used
+// RS485 트랜시버의 DE(driver enable) 핀(옵션).
+// 사용하지 않으면 -1로 설정하십시오.
 #ifndef MODBUS_DE_PIN
 #define MODBUS_DE_PIN -1
 #endif
@@ -68,15 +67,15 @@ static int build_modbus_fc03_request(uint8_t slave_id, uint16_t start_addr, uint
     return 8;
 }
 
-// FC04 (Read Input Registers) request format is identical to FC03 request
+// FC04 (입력 레지스터 읽기) 요청 포맷은 FC03과 동일함
 static __attribute__((unused)) int build_modbus_fc04_request(uint8_t slave_id, uint16_t start_addr, uint16_t count, uint8_t *out, int out_size)
 {
-    // same layout as FC03: slave(1) func(1) addr(2) count(2) crc(2)
+    // FC03과 동일한 레이아웃: slave(1) func(1) addr(2) count(2) crc(2)
     return build_modbus_fc03_request(slave_id, start_addr, count, out, out_size);
 }
 
-// FC16 / 0x10 (Write Multiple Registers) request builder
-// request: [slave][0x10][addr_hi][addr_lo][count_hi][count_lo][bytecount][data...][crc_lo][crc_hi]
+// FC16 / 0x10 (다중 레지스터 쓰기) 요청 빌더
+// 요청 형식: [slave][0x10][addr_hi][addr_lo][count_hi][count_lo][bytecount][data...][crc_lo][crc_hi]
 static int build_modbus_fc10_request(uint8_t slave_id, uint16_t start_addr, uint16_t count, const uint8_t *data_bytes, uint8_t *out, int out_size)
 {
     if (!out || !data_bytes) return 0;
@@ -102,7 +101,7 @@ static int build_modbus_fc10_request(uint8_t slave_id, uint16_t start_addr, uint
 static bool parse_modbus_fc03_response(const uint8_t *buf, int len, uint8_t expected_slave, uint16_t expected_count)
 {
     if (!buf) return false;
-    // Response: [slave][func][bytecount][data...][crc_lo][crc_hi]
+    // 응답 형식: [slave][func][bytecount][data...][crc_lo][crc_hi]
     if (len < 5) return false;
     if (buf[0] != expected_slave) return false;
     if (buf[1] != 0x03) return false;
@@ -123,7 +122,7 @@ static int uart_read_exact(uart_port_t port, uint8_t *dst, int want, TickType_t 
     while (got < want) {
         TickType_t now = xTaskGetTickCount();
         if (now - start >= timeout_ticks) break;
-        // use short reads so total timeout is respected (small per-call blocking)
+        // 작은 단위로 읽어 전체 타임아웃을 보장함(각 호출은 짧게 블록)
         int r = uart_read_bytes(port, dst + got, want - got, pdMS_TO_TICKS(1));
         if (r > 0) got += r;
     }
@@ -134,6 +133,7 @@ static bool uart_write_bytes_blocking(uart_port_t port, const uint8_t *data, siz
 {
     int written = uart_write_bytes(port, (const char *)data, len);
     if (written < 0) return false;
+    // 전송 완료를 대기
     uart_wait_tx_done(port, ticks);
     return true;
 }
@@ -142,17 +142,17 @@ static void rs485_set_tx(bool tx_enable)
 {
     if (MODBUS_DE_PIN < 0) return;
     gpio_set_level((gpio_num_t)MODBUS_DE_PIN, tx_enable ? 1 : 0);
-    // allow transceiver direction to settle
+    // 트랜시버 방향(송수신 전환)이 안정화될 때까지 짧게 대기
     esp_rom_delay_us(50);
 }
-// Modbus slave task moved to main/modbus_slave.cpp
+// Modbus 슬레이브 태스크는 이제 main/modbus_slave.cpp로 이동됨
 
 static void modbus_master_task(void *arg)
 {
     (void)arg;
     const uart_port_t uart_num = MODBUS_UART_NUM;
 
-    // Parameters requested by user
+    // 사용자에 의해 요청된 파라미터(폴링 대상 등)
     const uint8_t slave_id = 1;
     const uint16_t start_addr = 1;
     const uint16_t count = 2;
@@ -180,10 +180,10 @@ static void modbus_master_task(void *arg)
 
     TickType_t last_wake = xTaskGetTickCount();
     while (1) {
-        // flush any stale bytes
+        // 수신 버퍼에 남아있는 오래된 바이트를 비움
         uart_flush_input(uart_num);
 
-        // if DE pin is used, enable driver before transmit
+        // DE 핀을 사용하는 경우 송신 전에 드라이버(트랜시버)를 활성화
         rs485_set_tx(true);
         bool tx_ok = uart_write_bytes_blocking(uart_num, req, req_len, pdMS_TO_TICKS(200));
         rs485_set_tx(false);
@@ -218,7 +218,7 @@ static void modbus_master_task(void *arg)
                     }
 
                     // Persist D130..D159 (30 registers) to NVS so we can restore them on next boot.
-                    esp_err_t save_err = save_d130_region_to_nvs();
+                    esp_err_t save_err = EzApp::instance().saveD130RegionToNVS();
                     if (save_err != ESP_OK) {
                         ESP_LOGW(TAG, "Modbus master: failed to persist D130..D159: %s", esp_err_to_name(save_err));
                     }
@@ -230,7 +230,7 @@ static void modbus_master_task(void *arg)
                     cur_period = period_slow;
                 }
 
-                // Throttle warnings: log first, then every 10th timeout.
+                // 경고 로깅 제어: 첫 실패는 즉시, 이후는 10번째마다 로깅
                 if (consecutive_timeouts == 1 || (consecutive_timeouts % 10) == 0) {
                     if (got > 0) {
                         ESP_LOGW(TAG, "Modbus master RX invalid/timeout (got=%d need=%d, consecutive=%u)",
@@ -247,83 +247,13 @@ static void modbus_master_task(void *arg)
     vTaskDelete(NULL);
 }
 
-// Persist 30 int16 D-registers starting at D130 into NVS under key "d130_30".
-esp_err_t save_d130_region_to_nvs()
-{
-    const int count = 30;
-    int16_t vals[count];
-    for (int i = 0; i < count; ++i) {
-        int16_t v = 0;
-        EzApp::instance().readInt16(EzApp::D, (130 + i) * 2, v);
-        vals[i] = v;
-    }
-
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("modbus", NVS_READWRITE, &handle);
-    if (err == ESP_ERR_NVS_NOT_INITIALIZED) {
-        nvs_flash_init();
-        err = nvs_open("modbus", NVS_READWRITE, &handle);
-    }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "save_d130_region_to_nvs: nvs_open failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    err = nvs_set_blob(handle, "d130_30", vals, sizeof(vals));
-    if (err == ESP_OK) err = nvs_commit(handle);
-    nvs_close(handle);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "save_d130_region_to_nvs: nvs_set_blob/commit failed: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "save_d130_region_to_nvs: persisted %d registers from D130", count);
-    }
-    return err;
-}
-
-// Load 30 int16 D-registers from NVS key "d130_30" and write into EzApp D registers starting at D130.
-esp_err_t load_d130_region_from_nvs()
-{
-    const int count = 30;
-    int16_t vals[count];
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("modbus", NVS_READONLY, &handle);
-    if (err == ESP_ERR_NVS_NOT_INITIALIZED) {
-        nvs_flash_init();
-        err = nvs_open("modbus", NVS_READONLY, &handle);
-    }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "load_d130_region_from_nvs: nvs_open failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    size_t required = 0;
-    err = nvs_get_blob(handle, "d130_30", NULL, &required);
-    if (err != ESP_OK || required != sizeof(vals)) {
-        nvs_close(handle);
-        ESP_LOGI(TAG, "load_d130_region_from_nvs: no saved region or size mismatch (%s)", esp_err_to_name(err));
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    err = nvs_get_blob(handle, "d130_30", vals, &required);
-    nvs_close(handle);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "load_d130_region_from_nvs: read failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    for (int i = 0; i < count; ++i) {
-        EzApp::instance().writeInt16(EzApp::D, (130 + i) * 2, vals[i]);
-    }
-    ESP_LOGI(TAG, "load_d130_region_from_nvs: restored %d registers into D130..D%d", count, 130 + count - 1);
-    return ESP_OK;
-}
+// D130..D159 persistence is now implemented as EzApp methods.
 
 void start_modbus_master_task()
 {
-    // Ensure UART is configured for master polling (TX=GPIO27, RX=GPIO14) at requested baud.
-    // Note: UART1 cannot be shared by slave+master simultaneously.
-    // Attempt to restore any previously persisted D130..D159 values into EzApp before starting.
-    (void)load_d130_region_from_nvs();
+    // 모드버스 마스터 폴링을 위해 UART를 설정(TX=GPIO27, RX=GPIO14, 지정된 baud).
+    // 주의: UART1은 마스터/슬레이브 동시에 사용할 수 없음.
+    // 시작 전에 이전에 저장된 D130..D159 값을 복원 시도
 
     uart_driver_delete(MODBUS_UART_NUM);
 

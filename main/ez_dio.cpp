@@ -409,22 +409,7 @@ static void ez_dio_task(void *arg)
     //          adc_ch4, adc1_u1_channel_to_gpio(adc_ch4));
     (void)arg;
     EzApp &app = EzApp::instance();
-    // 루프 타이밍 통계 (마이크로초)
-    static uint64_t loop_sum_us = 0;
-    static uint32_t loop_min_us = UINT32_MAX;
-    static uint32_t loop_max_us = 0;
-    static uint32_t loop_count = 0;
-    static int64_t last_report_time_us = 0;
-    // 섹션별 타이밍 통계 (A..D) - 마이크로초
-    // A: D 그룹 증가
-    static uint64_t secA_sum_us = 0; static uint32_t secA_min_us = UINT32_MAX; static uint32_t secA_max_us = 0; static uint32_t secA_count = 0;
-    // B: PCF8574 입력 읽기 + X/D100 쓰기
-    static uint64_t secB_sum_us = 0; static uint32_t secB_min_us = UINT32_MAX; static uint32_t secB_max_us = 0; static uint32_t secB_count = 0;
-    // C: D 그룹 읽기 + 제어 로직
-    static uint64_t secC_sum_us = 0; static uint32_t secC_min_us = UINT32_MAX; static uint32_t secC_max_us = 0; static uint32_t secC_count = 0;
-    // D: Y 쓰기 + PCF8574 출력 쓰기 + D101 기록
-    static uint64_t secD_sum_us = 0; static uint32_t secD_min_us = UINT32_MAX; static uint32_t secD_max_us = 0; static uint32_t secD_count = 0;
-    // 참고: 산소 센서 읽기는 별도 태스크로 이동하여 루프 내 E 섹션 통계는 제거됨.
+    // Loop timing statistics removed to reduce log noise and overhead.
 
     // Oxygen sensor reads are handled in a separate task started below.
     // Initialize shared ADC manager once (safe to call repeatedly).
@@ -451,12 +436,8 @@ static void ez_dio_task(void *arg)
     int loop_cnt = 0;
     int16_t x0 = 0;
     while (1) {
-            int64_t loop_start_us = esp_timer_get_time();
         // 1) Increment D group at offset 0 (int32)
         app.writeInt32(EzApp::D, 0, loop_cnt++);
-        int64_t t_after_A = esp_timer_get_time();
-        uint32_t durA = (uint32_t)(t_after_A - loop_start_us);
-        secA_sum_us += durA; if (durA < secA_min_us) secA_min_us = durA; if (durA > secA_max_us) secA_max_us = durA; secA_count++;
 
         // 2) Read PCF8574 inputs and store to X group offset 0 (with retry)
         uint8_t raw = 0;
@@ -475,17 +456,6 @@ static void ez_dio_task(void *arg)
         } else {
             ESP_LOGW(TAG, "Failed read PCF_INPUT after retries: %d", r);
         }
-        int64_t t_after_B = esp_timer_get_time();
-        uint32_t durB = (uint32_t)(t_after_B - t_after_A);
-        secB_sum_us += durB; if (durB < secB_min_us) secB_min_us = durB; if (durB > secB_max_us) secB_max_us = durB; secB_count++;
-        // Log X0 bit states
-        // {
-        //     ESP_LOGI(TAG, "X0: 0x%02X (bits: %d %d %d %d %d %d %d %d)",
-        //              x0,
-        //              (x0 >> 7) & 1, (x0 >> 6) & 1, (x0 >> 5) & 1, (x0 >> 4) & 1,
-        //              (x0 >> 3) & 1, (x0 >> 2) & 1, (x0 >> 1) & 1, (x0 >> 0) & 1);
-        // }
-        // Check D102; if 0, control Y0 bits 3-4 based on D132 bits 2-3
         int16_t d102 = 0;
         app.readInt16(EzApp::D, curing_step_addr, d102);
         int16_t d131 = 0;
@@ -495,20 +465,14 @@ static void ez_dio_task(void *arg)
         int16_t y0 = 0;
         app.readInt16(EzApp::Y, 0, y0);
 
-        int64_t t_before_C = esp_timer_get_time();
         if (d102 == 0) {
             y0 = ez_dio_control_idle_state(app,d131, d132, x0, y0);
         } else {
             y0 = ez_dio_control_startup_state(app, d102,d131,x0, y0);
         }
-        int64_t t_after_C = esp_timer_get_time();
-        uint32_t durC = (uint32_t)(t_after_C - t_before_C);
-        secC_sum_us += durC; if (durC < secC_min_us) secC_min_us = durC; if (durC > secC_max_us) secC_max_us = durC; secC_count++;
 
-        // 3) Read Y group offset 0 and write to PCF8574 outputs (with retry)
-        // write updated Y back so other tasks see the forced state
+        // 3) Write updated Y back so other tasks see the forced state and output via PCF8574 (with retry)
         app.writeInt16(EzApp::Y, 0, y0);
-        int64_t t_before_D = esp_timer_get_time();
         uint8_t out_byte = static_cast<uint8_t>(y0 & 0xFF);
         r = ESP_FAIL;
         for (int retry = 0; retry < 3 && r != ESP_OK; retry++) {
@@ -522,51 +486,11 @@ static void ez_dio_task(void *arg)
         }
         // record DO (outputs) to D offset 101
         app.writeInt16(EzApp::D, 101 * 2, static_cast<int16_t>(out_byte));
-        int64_t t_after_D = esp_timer_get_time();
-        uint32_t durD = (uint32_t)(t_after_D - t_before_D);
-        secD_sum_us += durD; if (durD < secD_min_us) secD_min_us = durD; if (durD > secD_max_us) secD_max_us = durD; secD_count++;
 
         // 4) Oxygen readings handled by `oxygen_task` (separate task)
 
         loop_cnt++;
-        int64_t loop_end_us = esp_timer_get_time();
-        uint32_t loop_dur_us = (uint32_t)(loop_end_us - loop_start_us);
-        // update stats
-        loop_sum_us += loop_dur_us;
-        if (loop_dur_us < loop_min_us) loop_min_us = loop_dur_us;
-        if (loop_dur_us > loop_max_us) loop_max_us = loop_dur_us;
-        loop_count++;
-        // report every 10 seconds
-        if (last_report_time_us == 0) last_report_time_us = loop_end_us;
-        if ((loop_end_us - last_report_time_us) >= 10000000LL) {
-            double avg_us = loop_count ? ((double)loop_sum_us / (double)loop_count) : 0.0;
-            //ESP_LOGI(TAG, "Loop time (us) — min=%u max=%u avg=%.1f count=%u", loop_min_us, loop_max_us, avg_us, loop_count);
-            // per-section logs
-            double avgA = secA_count ? ((double)secA_sum_us / (double)secA_count) : 0.0;
-            double avgB = secB_count ? ((double)secB_sum_us / (double)secB_count) : 0.0;
-            double avgC = secC_count ? ((double)secC_sum_us / (double)secC_count) : 0.0;
-            double avgD = secD_count ? ((double)secD_sum_us / (double)secD_count) : 0.0;
-            ESP_LOGI(TAG, "Sections A..B (us): A min=%u max=%u avg=%.1f cnt=%u | B min=%u max=%u avg=%.1f cnt=%u",
-                     secA_min_us, secA_max_us, avgA, secA_count,
-                     secB_min_us, secB_max_us, avgB, secB_count);
-            ESP_LOGI(TAG, "Sections C..D (us): C min=%u max=%u avg=%.1f cnt=%u | D min=%u max=%u avg=%.1f cnt=%u",
-                     secC_min_us, secC_max_us, avgC, secC_count,
-                     secD_min_us, secD_max_us, avgD, secD_count);
-            //reset loop stats
-            loop_sum_us = 0;
-            loop_min_us = UINT32_MAX;
-            loop_max_us = 0;
-            loop_count = 0;
-            last_report_time_us = loop_end_us;
-            // reset per-section stats
-            secA_sum_us = 0; secA_min_us = UINT32_MAX; secA_max_us = 0; secA_count = 0;
-            secB_sum_us = 0; secB_min_us = UINT32_MAX; secB_max_us = 0; secB_count = 0;
-            secC_sum_us = 0; secC_min_us = UINT32_MAX; secC_max_us = 0; secC_count = 0;
-            secD_sum_us = 0; secD_min_us = UINT32_MAX; secD_max_us = 0; secD_count = 0;
-            // E (oxygen) handled in oxygen_task and logged separately by sensor code
-        }
-        // RTOS 스케줄링 및 I2C/ADC 활동을 허용하기 위한 짧은 딜레이
-        // I2C/ADC 접근을 고려할 때 2ms가 최소 합리적 루프 딜레이
+        // RTOS scheduling small delay to allow I2C/ADC activity
         vTaskDelay(pdMS_TO_TICKS(2));
     }
     vTaskDelete(NULL);

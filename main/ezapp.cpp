@@ -104,10 +104,85 @@ bool EzApp::loadRegionDescriptor(uint8_t regionId, Group &outGroup, uint32_t &ou
     return true;
 }
 
+// Save D130..D159 (30 x int16) into NVS under namespace "EzApp" key "d130_30".
+esp_err_t EzApp::saveD130RegionToNVS()
+{
+    const int count = 30;
+    int16_t vals[count];
+    for (int i = 0; i < count; ++i) {
+        int16_t v = 0;
+        // offsets are byte offsets in EzApp API
+        (void)readInt16(D, (130 + i) * 2, v);
+        vals[i] = v;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("EzApp", NVS_READWRITE, &handle);
+    if (err == ESP_ERR_NVS_NOT_INITIALIZED) {
+        nvs_flash_init();
+        err = nvs_open("EzApp", NVS_READWRITE, &handle);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW("EzApp", "saveD130RegionToNVS: nvs_open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_blob(handle, "d130_30", vals, sizeof(vals));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW("EzApp", "saveD130RegionToNVS: nvs_set_blob/commit failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI("EzApp", "saveD130RegionToNVS: persisted %d registers from D130", count);
+    }
+    return err;
+}
+
+// Load D130..D159 from NVS key "d130_30" and restore into EzApp D-group
+esp_err_t EzApp::loadD130RegionFromNVS()
+{
+    const int count = 30;
+    int16_t vals[count];
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("EzApp", NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_INITIALIZED) {
+        nvs_flash_init();
+        err = nvs_open("EzApp", NVS_READONLY, &handle);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW("EzApp", "loadD130RegionFromNVS: nvs_open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    size_t required = 0;
+    err = nvs_get_blob(handle, "d130_30", NULL, &required);
+    if (err != ESP_OK || required != sizeof(vals)) {
+        nvs_close(handle);
+        ESP_LOGI("EzApp", "loadD130RegionFromNVS: no saved region or size mismatch (%s)", esp_err_to_name(err));
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    err = nvs_get_blob(handle, "d130_30", vals, &required);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW("EzApp", "loadD130RegionFromNVS: read failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    suppress_persist_ = true;
+    for (int i = 0; i < count; ++i) {
+        (void)writeInt16(D, (130 + i) * 2, vals[i]);
+    }
+    suppress_persist_ = false;
+    ESP_LOGI("EzApp", "loadD130RegionFromNVS: restored %d registers into D130..D%d", count, 130 + count - 1);
+    return ESP_OK;
+}
+
 EzApp::EzApp()
     : initialized_(false)
 {
     for (int i = 0; i < COUNT; ++i) groups_[i] = nullptr;
+    suppress_persist_ = false;
     mutex_ = nullptr;
 }
 
@@ -120,10 +195,14 @@ bool EzApp::init()
 {
     if (initialized_) return true;
 
+
     for (int i = 0; i < COUNT; ++i) {
         groups_[i] = static_cast<uint8_t *>(std::calloc(1, GROUP_SIZE));
     }
+
+    // Mark initialized before any read/write helpers to avoid recursive init during load.
     initialized_ = true;
+    loadD130RegionFromNVS(); // Attempt to restore D130..D159 from NVS on init
 
     // Initialize PCF8574 expanders; not fatal if it fails, but log it
     if (!init_pcf8574()) {
@@ -139,7 +218,6 @@ bool EzApp::init()
             ESP_LOGW("EzApp", "Failed to create mutex for EzApp");
         }
     }
-
     return true;
 }
 
@@ -287,6 +365,7 @@ bool EzApp::readBytes(Group g, std::size_t offset, void *out, std::size_t len)
 
 bool EzApp::writeBytes(Group g, std::size_t offset, const void *data, std::size_t len)
 {
+    // Add logging for writeBytes operation
     if (!data || len == 0) return false;
     if (check_bounds_cpp(g, offset, len) != 0) return false;
 
@@ -296,6 +375,21 @@ bool EzApp::writeBytes(Group g, std::size_t offset, const void *data, std::size_
     std::memcpy(groups_[g] + offset, data, len);
     if (mutex_) {
         (void)xSemaphoreGive(mutex_);
+    }
+
+    // If this write touches D130..D159, persist the region to NVS.
+    // Note: offsets for EzApp APIs are BYTE offsets; D130 (word index) => byte offset = 130*2
+    if (g == D && initialized_ && !suppress_persist_) {
+        const std::size_t region_start = static_cast<std::size_t>(130 * 2);
+        const std::size_t region_end = region_start + static_cast<std::size_t>(30 * sizeof(int16_t));
+        const std::size_t write_end = offset + len;
+        if (offset < region_end && write_end > region_start) {
+            ESP_LOGI("EzApp", "writeBytes: persisting D130..D159 region to NVS");
+            esp_err_t perr = saveD130RegionToNVS();
+            if (perr != ESP_OK) {
+                ESP_LOGI("EzApp", "writeBytes: saveD130RegionToNVS failed: %s", esp_err_to_name(perr));
+            }
+        }
     }
     return true;
 }

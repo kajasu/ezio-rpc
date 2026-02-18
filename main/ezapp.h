@@ -3,6 +3,7 @@
 #define EZAPP_H
 
 #include <stdint.h>
+#include "esp_err.h"
 #ifdef __cplusplus
 #include <cstddef>
 #include <cstdbool>
@@ -72,6 +73,7 @@ private:
 
     uint8_t *groups_[COUNT];
     bool initialized_;
+    bool suppress_persist_;
     SemaphoreHandle_t mutex_; // protects read/write access to groups_
     
 public:
@@ -133,6 +135,12 @@ public:
 
     // Read a persisted region descriptor. Returns true if the entry exists and was read successfully.
     bool loadRegionDescriptor(uint8_t regionId, Group &outGroup, uint32_t &outStartOffsetBytes, uint32_t &outCountBytes);
+
+    // Convenience helpers for Modbus D130..D159 region persistence
+    // Save 30 int16 values from D130..D159 into NVS under namespace "modbus" key "d130_30".
+    esp_err_t saveD130RegionToNVS();
+    // Load 30 int16 values from NVS and restore into D130..D159. Returns ESP_OK if restored.
+    esp_err_t loadD130RegionFromNVS();
 };
 
 #endif // __cplusplus
