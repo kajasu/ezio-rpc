@@ -35,7 +35,7 @@ esp_err_t DFRobot_EOxygenSensor_I2C::begin(void)
     i2c_cmd_link_delete(cmd);
 
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "E-Oxygen sensor connected at 0x%02X", _addr);
+        //ESP_LOGI(TAG, "E-Oxygen sensor connected at 0x%02X", _addr);
     } else {
         ESP_LOGW(TAG, "E-Oxygen sensor NOT found at 0x%02X (err=%d)", _addr, err);
     }

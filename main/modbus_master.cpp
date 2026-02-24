@@ -195,6 +195,7 @@ static void modbus_master_task(void *arg)
             if (got == resp_len && parse_modbus_fc03_response(resp, got, slave_id, count)) {
                 consecutive_timeouts = 0;
                 cur_period = period_ok;
+                EzApp::instance().setModbusStatus(EzApp::DEVICE_OK);
                 int16_t v = ((int16_t)resp[3] << 8) | resp[4];
                 int16_t v2 = (((int16_t)resp[5] << 8) | resp[6])*10;
                 v *= 10;
@@ -228,15 +229,18 @@ static void modbus_master_task(void *arg)
                 // After a few consecutive failures, slow down polling to reduce log spam and bus load.
                 if (consecutive_timeouts >= 5) {
                     cur_period = period_slow;
+                        EzApp::instance().setModbusStatus(EzApp::DEVICE_ERROR);
+                        EzApp::instance().incrementModbusErrorCount();
                 }
 
                 // 경고 로깅 제어: 첫 실패는 즉시, 이후는 10번째마다 로깅
                 if (consecutive_timeouts == 1 || (consecutive_timeouts % 10) == 0) {
                     if (got > 0) {
-                        ESP_LOGW(TAG, "Modbus master RX invalid/timeout (got=%d need=%d, consecutive=%u)",
-                                 got, resp_len, (unsigned)consecutive_timeouts);
+                        ESP_LOGW(TAG, "Modbus master RX invalid/timeout (got=%d need=%d, consecutive=%u, errorCount=%u)",
+                                 got, resp_len, (unsigned)consecutive_timeouts, (unsigned)EzApp::instance().getModbusErrorCount());
                     } else {
-                        ESP_LOGW(TAG, "Modbus master RX timeout (consecutive=%u)", (unsigned)consecutive_timeouts);
+                        ESP_LOGW(TAG, "Modbus master RX timeout (consecutive=%u, errorCount=%u)", 
+                                 (unsigned)consecutive_timeouts, (unsigned)EzApp::instance().getModbusErrorCount());
                     }
                 }
             }

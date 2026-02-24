@@ -26,13 +26,63 @@ public:
     // Initialize PCF8574 I/O expanders (addresses configured below)
     bool init_pcf8574();
 
-    // RTC (DS1307) support
-    // Initialize RTC over I2C (ensures driver is configured). Returns true on success.
-    bool init_rtc();
 
     // Set RTC time. `year` is full year (e.g., 2026). `weekday` is 1..7 (Mon..Sun or device-specific mapping).
     // Returns true on success.
     bool set_rtc_time(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second, uint8_t weekday = 1);
+
+    // Read RTC time from DS1307. All output parameters are filled on success.
+    // `year` is returned as full year (e.g., 2026). `weekday` is 1..7 as stored on chip.
+    // Returns true on success. On success, also updates the cached rtc_time_ member.
+    bool get_rtc_time(uint16_t &year, uint8_t &month, uint8_t &day, uint8_t &hour, uint8_t &minute, uint8_t &second, uint8_t &weekday);
+
+    // Snapshot of the last successfully read RTC time.
+    struct RtcTime {
+        uint16_t year    = 0;
+        uint8_t  month   = 0;
+        uint8_t  day     = 0;
+        uint8_t  hour    = 0;
+        uint8_t  minute  = 0;
+        uint8_t  second  = 0;
+        uint8_t  weekday = 0;
+        bool     valid   = false; // true once at least one successful read has occurred
+    };
+
+    // Returns the last successfully cached RTC time (updated by get_rtc_time on success).
+    const RtcTime &rtc_time() const { return rtc_time_; }
+
+    // Read RTC time from hardware and update the cached rtc_time_. Returns true on success.
+    bool updateCurrentTime();
+
+    // Device status codes used for sensors and modbus devices
+    // 0 = DEVICE_KNOWN, 1 = DEVICE_OK, 2 = DEVICE_ERROR,
+    // 3 = DEVICE_INIT_DONE, 4 = DEVICE_INIT_PENDING
+    enum DeviceState {
+        DEVICE_KNOWN = 0,
+        DEVICE_OK = 1,
+        DEVICE_ERROR = 2,
+        DEVICE_INIT_DONE = 3,
+        DEVICE_INIT_PENDING = 4
+    };
+
+    // Accessors for O2 / CO2 sensor and Modbus device status
+    bool setO2Status(DeviceState s);
+    DeviceState getO2Status();
+    bool setCO2Status(DeviceState s);
+    DeviceState getCO2Status();
+    bool setModbusStatus(DeviceState s);
+    DeviceState getModbusStatus();
+
+    // Error counter accessors (publish to D121/D123/D125)
+    bool incrementO2ErrorCount();
+    bool incrementCO2ErrorCount();
+    bool incrementModbusErrorCount();
+    bool setO2ErrorCount(uint16_t v);
+    bool setCO2ErrorCount(uint16_t v);
+    bool setModbusErrorCount(uint16_t v);
+    uint16_t getO2ErrorCount();
+    uint16_t getCO2ErrorCount();
+    uint16_t getModbusErrorCount();
 
     // (log API removed)
 
@@ -61,7 +111,7 @@ public:
     // Updated to user-provided pins
     static constexpr int I2C_SDA_IO = 4;
     static constexpr int I2C_SCL_IO = 15;
-    static constexpr int I2C_FREQ_HZ = 400000;
+    static constexpr int I2C_FREQ_HZ = 100000;
     // If true, suppress any warning about using GPIO15 (strapping pin) for SCL
     static constexpr bool I2C_IGNORE_SCL_STRAPPING_WARNING = true;
 
@@ -75,7 +125,16 @@ private:
     bool initialized_;
     bool suppress_persist_;
     SemaphoreHandle_t mutex_; // protects read/write access to groups_
+    RtcTime rtc_time_;        // cached current RTC time (updated by get_rtc_time)
     
+    // Device status fields
+    DeviceState o2_status_;
+    DeviceState co2_status_;
+    DeviceState modbus_status_;
+    // Communication error counters
+    uint16_t o2_err_count_;
+    uint16_t co2_err_count_;
+    uint16_t modbus_err_count_;
 public:
     // --- Single value read/write (byte offsets) ---
     // NOTE: `offset` is a BYTE offset within the selected group.
