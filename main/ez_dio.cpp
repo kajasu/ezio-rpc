@@ -322,11 +322,24 @@ static int16_t ez_dio_control_auto(EzApp &app, int16_t d102,int16_t d131 ,int16_
     static uint32_t stop_time_92 = 0;
     static uint32_t stop_time_94 = 0;
 
+    int16_t cur_pressure = 0;   // D111: 현재 압력
+    int16_t pressure_sv = 0; // D144: 설정 압력
+    int16_t pressure_margin = 0; // D145: 압력 마진
+    int16_t duration_min = 0;
+    //int16_t cur_pressure = 0;   // D111: 현재 압력
+    int16_t pressure_limit = 0; // D144: 배출 완료 기준 압력
+
+    app.readInt16(EzApp::D, 111 * 2, cur_pressure);
+    app.readInt16(EzApp::D, 141 * 2, pressure_sv);
+    app.readInt16(EzApp::D, 145 * 2, pressure_margin);
+    app.readInt16(EzApp::D, 143 * 2, duration_min);
+    //app.readInt16(EzApp::D, 111 * 2, cur_pressure);
+    app.readInt16(EzApp::D, 144 * 2, pressure_limit);
 
     (void)time(nullptr);
-    
+    static bool isEmergency = false;
     // 치료종료(3단계 시퀀스): 90 -> 92 -> 94 -> 0
-    if (((d131 & 0x0002) || (x0 & 0x0002)|| (x0 & 0x0002)) && (d102 < 90)) { // D131.1 == 1
+    if (((d131 & 0x0002) || (x0 & 0x0002)|| (x0 & 0x0004)) && (d102 < 90)) { // D131.1 == 1
         app.writeInt16(EzApp::D, curing_step_addr, 90);
         app.writeInt16(EzApp::D, voice_out_no_addr, 8); // 치료가 중지합니다.
         ESP_LOGI(TAG, "[AUTO] 치료 중지 신호 감지, 종료 3단계 시작");
@@ -340,6 +353,12 @@ static int16_t ez_dio_control_auto(EzApp &app, int16_t d102,int16_t d131 ,int16_
         stop_time_90 = 0;
         stop_time_92 = 0;
         stop_time_94 = 0;
+        if(x0 & 0x0004){
+            isEmergency = true;
+            ESP_LOGW(TAG, "[AUTO] 긴급 정지 신호 감지 - 즉시 치료 종료 및 모든 출력 OFF");
+        } else {
+            isEmergency = false;
+        }        
         d102 = 90;
     }
     
@@ -349,45 +368,52 @@ static int16_t ez_dio_control_auto(EzApp &app, int16_t d102,int16_t d131 ,int16_
             stop_time_90 = xTaskGetTickCount();
             ESP_LOGI(TAG, "[Stop 90] 치료 출력 정지");
         }
-        y0 &= ~0x0004; // Y0.2 = 0
-        y0 &= ~0x0008; // Y0.3 = 0
-        y0 &= ~0x0010; // Y0.4 = 0
-        y0 &= ~0x0020; // Y0.5 = 0
-        if ((xTaskGetTickCount() - stop_time_90) >= pdMS_TO_TICKS(500)) {
+        y0 &= ~0x0004; // Y0.2 = 0 ()
+        y0 |= 0x0008;  // Y0.3 = 1 (압력벤트 시작)
+        y0 &= ~0x0010; // Y0.4 = 0 (온도 제어 OFF)   
+        if(isEmergency){
+            y0 &= ~0x0020;  // Y0.5 = 0 (산소 공급 OFF)
+        }else{
+            y0 |= 0x0020;  // Y0.5 = 1 (산소 공급 ON)            
+        }
+
+        if ((xTaskGetTickCount() - stop_time_90) >= pdMS_TO_TICKS(50)) {
             app.writeInt16(EzApp::D, curing_step_addr, 92);
             ESP_LOGI(TAG, "[Stop 90→92] 출력 정지 완료");
             stop_time_90 = 0;
         }
     // 종료 2단계: 문 열기
     } else if (d102 == 92) {
-        if (stop_time_92 == 0) {
-            stop_time_92 = xTaskGetTickCount();
-            app.writeInt16(EzApp::D, voice_out_no_addr, 10); // 잠시후 문이 열립니다
-            ESP_LOGI(TAG, "[Stop 92] 문 열기 준비");
-        }
-        if ((xTaskGetTickCount() - stop_time_92) >= pdMS_TO_TICKS(4000)) {
-                int16_t cur_pressure = 0;   // D111: 현재 압력
-                int16_t pressure_limit = 0; // D144: 문 열기 허용 압력 상한
 
-                app.readInt16(EzApp::D, 111 * 2, cur_pressure);
-                app.readInt16(EzApp::D, 144 * 2, pressure_limit);
+        int16_t cur_pressure = 0;   // D111: 현재 압력
+        int16_t pressure_limit = 0; // D144: 문 열기 허용 압력 상한
 
-                // 현재 압력이 기준보다 높으면 문 열기 차단
-                if (cur_pressure > pressure_limit) {
-                    app.writeInt16(EzApp::D, voice_out_no_addr, 20); // 압력이 높습니다 안내
-                    ESP_LOGW(TAG, "[Stop 92] 문 열기 차단 - 현재 압력 %d > 허용 압력 %d", cur_pressure, pressure_limit);
-                    app.writeInt16(EzApp::D, curing_step_addr, 94);
-                    ESP_LOGI(TAG, "[Stop 92→94] 문 열기 출력 적용");
-                    stop_time_92 = 0;
-                } else {
-                    ESP_LOGI(TAG, "[Stop 92] 문 열기 허용 - 현재 압력 %d <= 허용 압력 %d", cur_pressure, pressure_limit);
-                    y0 |= 0x0002;  // Y0.1 = 1
-                    y0 &= ~0x0001; // Y0.0 = 0
-                    app.writeInt16(EzApp::D, curing_step_addr, 94);
-                    ESP_LOGI(TAG, "[Stop 92→94] 문 열기 출력 적용");
-                    stop_time_92 = 0;
-                }            
-        }
+        app.readInt16(EzApp::D, 111 * 2, cur_pressure);
+        app.readInt16(EzApp::D, 144 * 2, pressure_limit);
+
+        // 현재 압력이 기준보다 높으면 문 열기 차단
+        if (cur_pressure > pressure_limit) {
+            //app.writeInt16(EzApp::D, voice_out_no_addr, 20); // 압력이 높습니다 안내
+            // ESP_LOGW(TAG, "[Stop 92] 문 열기 차단 - 현재 압력 %d > 허용 압력 %d", cur_pressure, pressure_limit);
+            // app.writeInt16(EzApp::D, curing_step_addr, 94);
+            // ESP_LOGI(TAG, "[Stop 92→94] 문 열기 출력 적용");
+            // stop_time_92 = 0;
+        } else {
+            if (stop_time_92 == 0) {
+                stop_time_92 = xTaskGetTickCount();
+                app.writeInt16(EzApp::D, voice_out_no_addr, 10); // 잠시후 문이 열립니다
+                ESP_LOGI(TAG, "[Stop 92] 문 열기 준비");
+            }
+            if ((xTaskGetTickCount() - stop_time_92) >= pdMS_TO_TICKS(4000)) {
+                ESP_LOGI(TAG, "[Stop 92] 문 열기 허용 - 현재 압력 %d <= 허용 압력 %d", cur_pressure, pressure_limit);
+                y0 |= 0x0002;  // Y0.1 = 1
+                y0 &= ~0x0001; // Y0.0 = 0
+                y0 &= ~0x0020; // Y0.5 = 0 (산소 공급 OFF)
+                app.writeInt16(EzApp::D, curing_step_addr, 94);
+                ESP_LOGI(TAG, "[Stop 92→94] 문 열기 출력 적용");
+                stop_time_92 = 0;            
+            }
+        } 
     // 종료 3단계: 종료 완료 및 수동모드 복귀
     } else if (d102 == 94) {
         if (stop_time_94 == 0) {
@@ -508,19 +534,10 @@ static int16_t ez_dio_control_auto(EzApp &app, int16_t d102,int16_t d131 ,int16_
             start_time_30 = 0;
         }
     } else if (d102 == 36) {
-        app.writeInt16(EzApp::D, voice_out_no_addr, 21); //마무리 단계입니다.
+        app.writeInt16(EzApp::D, voice_out_no_addr, 21); //
         
 
-        int16_t cur_pressure = 0;   // D111: 현재 압력
-        int16_t pressure_sv = 0; // D144: 설정 압력
-        int16_t pressure_margin = 0; // D145: 압력 마진
-
-        app.readInt16(EzApp::D, 111 * 2, cur_pressure);
-        app.readInt16(EzApp::D, 141 * 2, pressure_sv);
-        app.readInt16(EzApp::D, 145 * 2, pressure_margin);
-
-        int16_t duration_min = 0;
-        app.readInt16(EzApp::D, 143 * 2, duration_min);
+        
         if (duration_min <= 0) {
             duration_min = 20; // 기본 20분  
             app.writeInt16(EzApp::D, 143 * 2, duration_min);
@@ -594,12 +611,14 @@ static int16_t ez_dio_control_auto(EzApp &app, int16_t d102,int16_t d131 ,int16_
         }
 
         //압력이 초과하면 배출, 가압중지 , 압력이 기준이하면 배출금지 , 가압   
-
         // 경과시간(분) 계산해서 D119에 저장
         uint32_t elapsed_ms = xTaskGetTickCount() - start_time_30;
-        int16_t elapsed_min = static_cast<int16_t>(elapsed_ms / (60U * 1000U));
+        int16_t elapsed_min = static_cast<int16_t>(elapsed_ms / (60U * 100U));
         app.writeInt16(EzApp::D, 119 * 2, elapsed_min);
-        
+        int16_t elapsed_min_s = 0;
+
+        app.readInt16(EzApp::D, 119 * 2, elapsed_min_s);
+        //ESP_LOGI(TAG, "[Step 36] 경과시간: %d분 , 대기시간: %lu ticks, 경과시간(ms): %lu", static_cast<int>(elapsed_min_s), static_cast<unsigned long>(wait_ticks), static_cast<unsigned long>(elapsed_ms));
         if (elapsed_ms >= wait_ticks) {
             y0 &= ~0x0004;  // Y0.2 = 0
             y0 &= ~0x0010;  // Y0.4 = 0
@@ -611,6 +630,7 @@ static int16_t ez_dio_control_auto(EzApp &app, int16_t d102,int16_t d131 ,int16_
     } else if (d102 == 40) {
         if (start_time_40 == 0) {
             start_time_40 = xTaskGetTickCount();
+            y0 |= 0x0008;  // Y0.3 = 1 (압력벤트 시작)
             ESP_LOGI(TAG, "[Step 40] 배출 단계 시작");
         }
         if ((xTaskGetTickCount() - start_time_40) >= pdMS_TO_TICKS(2000)) {         
@@ -619,16 +639,12 @@ static int16_t ez_dio_control_auto(EzApp &app, int16_t d102,int16_t d131 ,int16_
             start_time_40 = 0;
         }
     } else if (d102 == 50) {
-        int16_t cur_pressure = 0;   // D111: 현재 압력
-        int16_t pressure_limit = 0; // D144: 배출 완료 기준 압력
         app.writeInt16(EzApp::D, voice_out_no_addr, 14); //배출을 시작합니다.
         if (start_time_50 == 0) {
             start_time_50 = xTaskGetTickCount();
             ESP_LOGI(TAG, "[Step 50] 배출 단계 시작");
         }
         
-        app.readInt16(EzApp::D, 111 * 2, cur_pressure);
-        app.readInt16(EzApp::D, 144 * 2, pressure_limit);
 
         // 현재 압력이 기준보다 높으면 문 열기 차단
         if (cur_pressure < pressure_limit) {
@@ -644,8 +660,9 @@ static int16_t ez_dio_control_auto(EzApp &app, int16_t d102,int16_t d131 ,int16_
         }   
         app.writeInt16(EzApp::D, voice_out_no_addr, 10); //잠시후 문이 열립니다
         if ((xTaskGetTickCount() - start_time_80) >= pdMS_TO_TICKS(3000)) {
-            y0 |= 0x0002;  // Y0.1 = 1
-            y0 &= ~0x0001; // Y0.0 = 0
+            y0 |= 0x0002;  // Y0.1 = 1 (문 열기)
+            y0 &= ~0x0001; // Y0.0 = 0 (문 닫기 OFF)
+            y0 &= ~0x0020; // Y0.5 = 0 (산소 공급 OFF)
             app.writeInt16(EzApp::D, curing_step_addr, 99);
             ESP_LOGI(TAG, "[Step 80→99] 3초 경과, 문 열기 명령 발령");
             start_time_80 = 0;
@@ -655,10 +672,10 @@ static int16_t ez_dio_control_auto(EzApp &app, int16_t d102,int16_t d131 ,int16_
             ESP_LOGI(TAG, "[Step 99] 치료 완료, 모든 출력 OFF");
             start_time_80 = 1;  // 로그 중복 방지
         }
-        y0 &= ~0x0004; // Y0.2 = 0
-        y0 &= ~0x0008; // Y0.3 = 0
-        y0 &= ~0x0010; // Y0.4 = 0
-        y0 &= ~0x0020; // Y0.5 = 0
+        y0 &= ~0x0004; // Y0.2 = 0 (가압 OFF)
+        y0 &= ~0x0008; // Y0.3 = 0 (압력 벤트 OFF)
+        y0 &= ~0x0010; // Y0.4 = 0 (온도 제어 OFF)
+        y0 &= ~0x0020; // Y0.5 = 0 (산소 공급 OFF)
         app.writeInt16(EzApp::D, curing_step_addr, 0);
         app.writeInt16(EzApp::D, voice_out_no_addr, 8); //치료가 중지합니다.
     }
@@ -727,12 +744,31 @@ static void ez_dio_task(void *arg)
         int16_t y0 = 0;
         app.readInt16(EzApp::Y, 0, y0);
 
+        //압력 설정값이 300 이상이면 300으로 제한 (안전장치)
+        int16_t pressure_sv = 0;
+        app.readInt16(EzApp::D, 141 * 2, pressure_sv);
+        if(pressure_sv > 300){
+            pressure_sv = 300;
+            app.writeInt16(EzApp::D, 141 * 2, pressure_sv);
+
+        }
+
+
         if (d102 == 0) {
             y0 = ez_dio_control_manual(app,d131, d132, x0, y0);
         } else {
             y0 = ez_dio_control_auto(app, d102,d131,x0, y0);
         }
 
+        //현재압력이 300 이상이면 압력제어 강제로 off, 배출제어 강제로 ON (안전장치)
+        int16_t cur_pressure = 0;   // D111: 현재 압력
+        app.readInt16(EzApp::D, 111 * 2, cur_pressure);
+        if(cur_pressure > 300){
+            //압력제어
+            y0 &= ~0x0004; // Y0.2 = 0
+            //배출제어
+            y0 |= 0x0008;  // Y0.1 = 1
+        }
 
         //온도제어(자동여보와 관계없이)
         if (d131 & 0x0004) { // D131.2 == 1
